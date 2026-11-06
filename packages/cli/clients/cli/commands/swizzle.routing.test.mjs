@@ -414,7 +414,12 @@ describe('swizzle — shared modules outside the component folder (spec:AST-110 
     const humanResult = await runCli(['swizzle', 'Row', '-f'], project);
     expect(humanResult.code).toBe(0);
     expect(humanResult.stdout).toContain(
-      'Shared modules: ../privateAttributes/row.stylex.ts, ../motion/fade.stylex.ts (copied whole; their imports between each other stay relative)',
+      "Copied beside it: ../privateAttributes/row.stylex.ts, ../motion/fade.stylex.ts (in the package's folder layout; imported by relative path)",
     );
+    // The copy keeps relative imports of the modules it carries.
+    expect(humanResult.stdout).toContain(
+      'the internal modules the component needs are copied beside it',
+    );
+    expect(humanResult.stdout).not.toContain('have been rewritten');
   });
 });
