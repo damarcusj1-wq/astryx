@@ -67,7 +67,7 @@ export const doc = {
       name: 'options.overwrite',
       type: 'boolean',
       description:
-        "Replace the component's existing files instead of erroring. A helper an earlier swizzle wrote is never replaced: a different one stays, and the new copy writes its own under a version-suffixed name. A changed private attribute owner module, or a style module it imports, throws ERR_FILE_EXISTS without overwrite and is replaced with it.",
+        "Replace the component's existing files instead of erroring. A helper an earlier swizzle wrote is never replaced by a copy that carries it: a different one stays, and the new copy writes its own under a version-suffixed name. Swizzling the component whose folder holds that helper counts it as one of that component's own files. A changed private attribute owner module, or a style module it imports, throws ERR_FILE_EXISTS without overwrite and is replaced with it.",
       default: 'false',
     },
   ],
