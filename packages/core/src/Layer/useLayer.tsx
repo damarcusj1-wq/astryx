@@ -522,6 +522,37 @@ function exitAnimations(layer: HTMLElement | null): Animation[] {
 }
 
 /**
+ * Whether `layer` can still paint after it hides. Only a transition that
+ * changes `display` or `overlay` discretely keeps a hidden layer shown, until
+ * it ends. Without one, the layer stops painting as it hides, and so does
+ * every animation in it.
+ */
+function keepsPaintingAfterHide(layer: HTMLElement): boolean {
+  const style = layer.ownerDocument.defaultView?.getComputedStyle(layer);
+  if (style == null) {
+    return false;
+  }
+  const list = (name: string) =>
+    style
+      .getPropertyValue(name)
+      .split(',')
+      .map(value => value.trim());
+  const behaviors = list('transition-behavior');
+  const durations = list('transition-duration').map(parseFloat);
+  const delays = list('transition-delay').map(parseFloat);
+  return list('transition-property').some((name, index) => {
+    const behavior = behaviors[index % behaviors.length];
+    const duration = durations[index % durations.length] || 0;
+    const delay = delays[index % delays.length] || 0;
+    return (
+      (name === 'all' || name === 'display' || name === 'overlay') &&
+      behavior === 'allow-discrete' &&
+      duration + Math.max(0, delay) > 0
+    );
+  });
+}
+
+/**
  * Whether the standard list has failed a layer that must keep its anchor
  * clear: its box covers the anchor or, while the anchor is in view, leaves the
  * viewport on the block axis. Only a box that overlaps the anchor counts; a
@@ -1192,10 +1223,17 @@ function useLayerImplementation(
   // again during it. Null once it has ended.
   const exitRef = useRef<object | null>(null);
 
+  // keepsPaintingAfterHide for the hide the browser runs itself, read as it
+  // starts.
+  const browserHideKeepsPaintingRef = useRef(false);
+
   // A closed trigger is no anchor, once the layer stops painting. A show
   // during the exit keeps the name, and so does a later exit.
+  // `canKeepPainting` is keepsPaintingAfterHide, read before the hide. Only
+  // such a layer gets its animations read. That read updates style and
+  // layout between the writes of the close.
   const releaseAnchor = useCallback(
-    (layer: HTMLElement | null) => {
+    (layer: HTMLElement | null, canKeepPainting: boolean) => {
       const exit = {};
       exitRef.current = exit;
       const release = () => {
@@ -1208,7 +1246,7 @@ function useLayerImplementation(
           removeAnchorName(trigger, anchorId);
         }
       };
-      const running = exitAnimations(layer);
+      const running = canKeepPainting ? exitAnimations(layer) : [];
       if (running.length === 0) {
         release();
         return;
@@ -1465,6 +1503,7 @@ function useLayerImplementation(
     pendingShowRef.current = false;
     if (isOpenRef.current) {
       const el = popoverRef.current;
+      const canKeepPainting = el != null && keepsPaintingAfterHide(el);
       // A close that plays out after the layer is hidden starts here, while
       // the browser still shows it. The `beforetoggle` handler below starts
       // the browser's own hides.
@@ -1489,10 +1528,10 @@ function useLayerImplementation(
           el.style.display = 'none';
         }
       }
+      releaseAnchor(el, canKeepPainting);
       setIsOpen(false);
       onHide?.();
     }
-    releaseAnchor(popoverRef.current);
     clearContextMount();
   }, [onHide, clearContextMount, releaseAnchor]);
 
@@ -1617,6 +1656,7 @@ function useLayerImplementation(
     const toggleEvent = e as ToggleEvent;
     const el = e.currentTarget as HTMLElement | null;
     if (toggleEvent.newState === 'closed' && isOpenRef.current && el != null) {
+      browserHideKeepsPaintingRef.current = keepsPaintingAfterHide(el);
       observeBrowserHide(el);
       onCloseStartRef.current?.();
     }
@@ -1631,7 +1671,11 @@ function useLayerImplementation(
         rememberDismissal(
           (e.currentTarget as HTMLElement | null)?.ownerDocument ?? document,
         );
-        releaseAnchor(e.currentTarget as HTMLElement | null);
+        releaseAnchor(
+          e.currentTarget as HTMLElement | null,
+          browserHideKeepsPaintingRef.current,
+        );
+        browserHideKeepsPaintingRef.current = false;
         setIsOpen(false);
         onHide?.();
         clearContextMount();
