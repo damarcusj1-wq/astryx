@@ -46,7 +46,7 @@
  * @property {string} [output] Output directory (must resolve inside cwd). Defaults to ./components/astryx.
  * @property {string} [package] Scope to a specific owning package when a name is ambiguous.
  * @property {boolean} [list] Force the list response even with a component argument.
- * @property {boolean} [overwrite] Replace the component's existing files instead of erroring. Helpers an earlier swizzle wrote are never replaced.
+ * @property {boolean} [overwrite] Replace the component's existing files instead of erroring. Helpers an earlier swizzle wrote are never replaced, except a changed private attribute owner module and the style modules it imports.
  */
 
 export {};

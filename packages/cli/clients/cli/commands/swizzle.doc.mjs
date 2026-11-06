@@ -49,7 +49,7 @@ export const doc = {
       flag: '-f, --overwrite',
       param: 'options.overwrite',
       description:
-        "Replace the component's existing files. Without it, existing files fail the command with ERR_FILE_EXISTS and nothing is written. A helper an earlier swizzle wrote is reused when it is the same and is never replaced: a different one stays, and this copy writes its own under a version-suffixed name",
+        "Replace the component's existing files. Without it, existing files fail the command with ERR_FILE_EXISTS and nothing is written. A helper an earlier swizzle wrote is reused when it is the same and is never replaced: a different one stays, and this copy writes its own under a version-suffixed name. A changed private attribute owner module, or a style module it imports, fails the command without --overwrite and is replaced with it",
     },
   ],
   examples: [

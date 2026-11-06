@@ -523,3 +523,70 @@ describe('swizzle.copy — helpers an earlier swizzle wrote (spec:AST-110 FR2)',
     SLOW,
   );
 });
+
+describe('swizzle.copy — a name the package exports only as a type (spec:AST-110 FR1)', () => {
+  /** @type {string} */
+  let project;
+  beforeEach(() => {
+    project = fs.mkdtempSync(path.join(os.tmpdir(), 'astryx-swizzle-kinds-'));
+    fs.writeFileSync(
+      path.join(project, 'package.json'),
+      JSON.stringify({name: 'consumer', version: '1.0.0'}),
+    );
+    const core = path.join(project, 'node_modules/@astryxdesign/core');
+    const write = (rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(core, rel)), {recursive: true});
+      fs.writeFileSync(path.join(core, rel), text);
+    };
+    write(
+      'package.json',
+      JSON.stringify({
+        name: '@astryxdesign/core',
+        version: '1.0.0',
+        exports: {'.': {source: './src/index.ts', default: './dist/index.js'}},
+      }),
+    );
+    write('src/utils/shape.ts', "export const shape = 'round';\n");
+    write('src/utils/size.ts', 'export const size = 1;\n');
+    // The package root re-exports `shape` as a type only, `size` as a value.
+    write(
+      'src/index.ts',
+      [
+        "export type {shape} from './utils/shape';",
+        "export {size} from './utils/size';",
+        "export {Button} from './Button/Button';",
+        '',
+      ].join('\n'),
+    );
+    write(
+      'src/Button/Button.tsx',
+      [
+        "import {shape} from '../utils/shape';",
+        "import {size} from '../utils/size';",
+        'export const Button = () => `${shape} ${size}`;',
+        '',
+      ].join('\n'),
+    );
+    write('src/Button/index.ts', "export {Button} from './Button';\n");
+  });
+  afterEach(() => {
+    fs.rmSync(project, {recursive: true, force: true});
+  });
+
+  it(
+    'carries a value the package exports only as a type, and imports a value export from the package',
+    async () => {
+      const r = await swizzle('Button', {cwd: project});
+      const source = fs.readFileSync(
+        path.join(project, 'components/astryx/Button/Button.tsx'),
+        'utf-8',
+      );
+      // A type-only export is erased at runtime, so the copy carries `shape`.
+      expect(source).toContain("from '../utils/shape'");
+      expect(r.data.files).toContain('../utils/shape.ts');
+      expect(source).toContain("import {size} from '@astryxdesign/core';");
+      expect(r.data.files).not.toContain('../utils/size.ts');
+    },
+    SLOW,
+  );
+});

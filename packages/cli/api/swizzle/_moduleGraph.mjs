@@ -218,12 +218,18 @@ function visitDynamicReferences(node, onLiteral) {
 }
 
 /**
- * @typedef {(file: string) => Map<string, {file: string, name: string}>} OriginsOf
- *   every name a module exports, types included, with where it is declared
+ * @typedef {'value' | 'type'} ExportKind `value` reads runtime exports only;
+ *   `type` reads type-only exports too
+ *
+ * @typedef {(file: string, kind: ExportKind) => Map<string, {file: string, name: string}>} OriginsOf
+ *   every name a module exports, with where it is declared
+ *
+ * @typedef {Map<string, Array<{subpath: string, name: string}>>} ExportersByOrigin
+ *   `file#name` of a declaration -> the subpaths that export it, and as what
  *
  * @typedef {object} PublicSurface
- * @property {Map<string, Array<{subpath: string, name: string}>>} byOrigin
- *   `file#name` of a declaration -> the subpaths that export it, and as what
+ * @property {Record<ExportKind, ExportersByOrigin>} byOrigin the subpaths
+ *   that export each declaration as a value, and as a value or a type
  * @property {Map<string, string>} byFile source file -> the subpath that
  *   exports exactly that file
  * @property {Record<string, unknown>|undefined} exportsField
@@ -253,7 +259,7 @@ function publicSurfaceOf(packageDir, srcRoot, originsOf) {
       ? /** @type {Record<string, unknown>} */ (pkg.exports)
       : undefined;
   /** @type {PublicSurface['byOrigin']} */
-  const byOrigin = new Map();
+  const byOrigin = {value: new Map(), type: new Map()};
   /** @type {PublicSurface['byFile']} */
   const byFile = new Map();
   for (const subpath of Object.keys(exportsField ?? {})) {
@@ -262,11 +268,13 @@ function publicSurfaceOf(packageDir, srcRoot, originsOf) {
     if (!sourceFile || !sourceFile.startsWith(srcRoot + path.sep)) continue;
     byFile.set(sourceFile, subpath);
     if (!CODE_FILE.test(sourceFile)) continue;
-    for (const [name, origin] of originsOf(sourceFile)) {
-      const key = `${origin.file}#${origin.name}`;
-      const list = byOrigin.get(key) ?? [];
-      list.push({subpath, name});
-      byOrigin.set(key, list);
+    for (const kind of /** @type {const} */ (['value', 'type'])) {
+      for (const [name, origin] of originsOf(sourceFile, kind)) {
+        const key = `${origin.file}#${origin.name}`;
+        const list = byOrigin[kind].get(key) ?? [];
+        list.push({subpath, name});
+        byOrigin[kind].set(key, list);
+      }
     }
   }
   return {byOrigin, byFile, exportsField};
@@ -314,19 +322,34 @@ export function planCopy({
 }) {
   // Every read is cached for this copy only, so a later copy sees the
   // package as it is then.
-  /** @type {Map<string, Map<string, {file: string, name: string}>>} */
-  const exportMemo = new Map();
+  const exportMemos = {value: new Map(), type: new Map()};
   /** @type {OriginsOf} */
-  const originsOf = file =>
-    moduleExportOrigins(file, {types: true, memo: exportMemo});
+  const originsOf = (file, kind) =>
+    moduleExportOrigins(file, {
+      types: kind === 'type',
+      memo: exportMemos[kind],
+    });
   /** @param {string} file @param {string} name */
-  const originOf = (file, name) => originsOf(file).get(name) ?? null;
+  const originOf = (file, name) => originsOf(file, 'type').get(name) ?? null;
+  /**
+   * The subpaths that export a module's export: as a value when the import
+   * takes a value, since a type-only export is erased at runtime.
+   * @param {string} file
+   * @param {string} name
+   * @param {boolean} typeOnly
+   */
+  const exportersOf = (file, name, typeOnly) => {
+    const origin = originOf(file, name);
+    if (!origin) return [];
+    const kind = typeOnly ? 'type' : 'value';
+    return surface.byOrigin[kind].get(`${origin.file}#${origin.name}`) ?? [];
+  };
   /**
    * The name a module exports one of its own bindings under, or null.
    * @param {{file: string, name: string}} origin
    */
   const exportNameOf = origin => {
-    for (const [name, found] of originsOf(origin.file)) {
+    for (const [name, found] of originsOf(origin.file, 'type')) {
       if (found.file === origin.file && found.name === origin.name) return name;
     }
     return null;
@@ -361,16 +384,14 @@ export function planCopy({
   const subpathCoveringModule = file => {
     const exact = surface.byFile.get(file);
     if (exact) return exact;
-    const names = [...originsOf(file).keys()];
+    const names = [...originsOf(file, 'type').keys()];
     if (names.length === 0) return null;
-    const options = names.map(name => {
-      const origin = originOf(file, name);
-      return origin
-        ? (surface.byOrigin.get(`${origin.file}#${origin.name}`) ?? [])
-            .filter(o => o.name === name)
-            .map(o => o.subpath)
-        : [];
-    });
+    const values = originsOf(file, 'value');
+    const options = names.map(name =>
+      exportersOf(file, name, !values.has(name))
+        .filter(o => o.name === name)
+        .map(o => o.subpath),
+    );
     const common = options.reduce((acc, list) =>
       acc.filter(s => list.includes(s)),
     );
@@ -503,9 +524,7 @@ export function planCopy({
         continue;
       }
       const origin = originOf(target, spec.imported);
-      const publicOptions = origin
-        ? (surface.byOrigin.get(`${origin.file}#${origin.name}`) ?? [])
-        : [];
+      const publicOptions = exportersOf(target, spec.imported, spec.typeOnly);
       const chosen = choosePublic(
         publicOptions.map(o => o.subpath),
         target,
