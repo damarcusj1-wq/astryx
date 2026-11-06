@@ -77,7 +77,10 @@ function buildFakeCore(project) {
  * @param {string} project
  * @param {{issuesUrl?: string|null, componentName?: string}} [opts]
  */
-function buildIntegration(project, {issuesUrl, componentName = 'MetaAppShell'} = {}) {
+function buildIntegration(
+  project,
+  {issuesUrl, componentName = 'MetaAppShell'} = {},
+) {
   const intDir = path.join(project, 'node_modules', '@test', 'meta');
   const compRoot = path.join(intDir, 'components');
   const compDir = path.join(compRoot, componentName);
@@ -101,10 +104,7 @@ function buildIntegration(project, {issuesUrl, componentName = 'MetaAppShell'} =
       '',
     ].join('\n'),
   );
-  fs.writeFileSync(
-    path.join(compDir, 'sibling.ts'),
-    `export const sib = 1;\n`,
-  );
+  fs.writeFileSync(path.join(compDir, 'sibling.ts'), `export const sib = 1;\n`);
   // An unexported helper beside the component folder.
   fs.mkdirSync(path.join(compRoot, 'utils'), {recursive: true});
   fs.writeFileSync(
@@ -158,7 +158,9 @@ describe('swizzle — core feedback routing via config', () => {
     const env = JSON.parse(result.stdout);
     expect(env.type).toBe('swizzle.copy');
     expect(env.data.package).toBe('@astryxdesign/core');
-    expect(env.data.feedback.issuesUrl).toBe('https://github.com/acme/ds/issues');
+    expect(env.data.feedback.issuesUrl).toBe(
+      'https://github.com/acme/ds/issues',
+    );
     // Escaping import rewritten to core; sibling import preserved.
     const out = fs.readFileSync(
       path.join(project, 'components', 'astryx', 'Button', 'Button.tsx'),
@@ -187,7 +189,10 @@ describe('swizzle — integration-owned components', () => {
     writeProjectPackageJson(project);
     buildIntegration(project, {issuesUrl: 'https://example.com/meta/issues'});
 
-    const result = await runCli(['--json', 'swizzle', 'MetaAppShell', '-f'], project);
+    const result = await runCli(
+      ['--json', 'swizzle', 'MetaAppShell', '-f'],
+      project,
+    );
     expect(result.code).toBe(0);
     const env = JSON.parse(result.stdout);
     expect(env.type).toBe('swizzle.copy');
@@ -201,13 +206,17 @@ describe('swizzle — integration-owned components', () => {
     expect(env.data.feedback.issuesUrl).toBe('https://example.com/meta/issues');
 
     const outDir = path.join(project, 'components', 'astryx', 'MetaAppShell');
-    expect(fs.existsSync(path.join(outDir, 'MetaAppShell.doc.mjs'))).toBe(false);
+    expect(fs.existsSync(path.join(outDir, 'MetaAppShell.doc.mjs'))).toBe(
+      false,
+    );
     const out = fs.readFileSync(path.join(outDir, 'MetaAppShell.tsx'), 'utf-8');
     // The helper is not exported, so the copy carries it in the same layout.
     expect(out).toContain(`from '../utils/foo'`);
     expect(env.data.files).toContain('../utils/foo.ts');
     expect(
-      fs.existsSync(path.join(project, 'components', 'astryx', 'utils', 'foo.ts')),
+      fs.existsSync(
+        path.join(project, 'components', 'astryx', 'utils', 'foo.ts'),
+      ),
     ).toBe(true);
     expect(out).toContain(`from './sibling'`);
   });
@@ -233,7 +242,10 @@ describe('swizzle — integration-owned components', () => {
       ].join('\n'),
     );
 
-    const result = await runCli(['--json', 'swizzle', 'MetaAppShell', '-f'], project);
+    const result = await runCli(
+      ['--json', 'swizzle', 'MetaAppShell', '-f'],
+      project,
+    );
     expect(result.code).toBe(0);
     const env = JSON.parse(result.stdout);
     const output = path.join(project, 'components', 'astryx');
@@ -243,9 +255,137 @@ describe('swizzle — integration-owned components', () => {
     );
     expect(out).toContain(`from '../lib/helper'`);
     expect(env.data.files).toContain('../lib/helper.ts');
-    expect(fs.readFileSync(path.join(output, 'lib', 'helper.ts'), 'utf-8')).toBe(
-      `export const helper = 2;\n`,
+    expect(
+      fs.readFileSync(path.join(output, 'lib', 'helper.ts'), 'utf-8'),
+    ).toBe(`export const helper = 2;\n`);
+  });
+
+  it('keeps a root module apart from a same-named one inside the components folder', async () => {
+    buildFakeCore(project);
+    writeProjectPackageJson(project);
+    const {intDir, compDir} = buildIntegration(project, {
+      issuesUrl: 'https://example.com/meta/issues',
+    });
+    fs.mkdirSync(path.join(intDir, 'utils'), {recursive: true});
+    fs.writeFileSync(
+      path.join(intDir, 'utils', 'foo.ts'),
+      `export const root = 3;\n`,
     );
+    fs.writeFileSync(
+      path.join(compDir, 'MetaAppShell.tsx'),
+      [
+        `import x from '../utils/foo';`,
+        `import {root} from '../../utils/foo';`,
+        `export function MetaAppShell() { return x + root; }`,
+        '',
+      ].join('\n'),
+    );
+
+    const result = await runCli(
+      ['--json', 'swizzle', 'MetaAppShell', '-f'],
+      project,
+    );
+    expect(result.code).toBe(0);
+    const output = path.join(project, 'components', 'astryx');
+    const out = fs.readFileSync(
+      path.join(output, 'MetaAppShell', 'MetaAppShell.tsx'),
+      'utf-8',
+    );
+    // The module inside `components/` keeps its layout; the root one moves
+    // to a folder named after the package.
+    expect(out).toContain(`import x from '../utils/foo';`);
+    expect(out).toContain(`import {root} from '../meta/utils/foo';`);
+    expect(fs.readFileSync(path.join(output, 'utils', 'foo.ts'), 'utf-8')).toBe(
+      `export default 1;\n`,
+    );
+    expect(
+      fs.readFileSync(path.join(output, 'meta', 'utils', 'foo.ts'), 'utf-8'),
+    ).toBe(`export const root = 3;\n`);
+  });
+
+  it('imports a stylesheet the package exports from the package', async () => {
+    buildFakeCore(project);
+    writeProjectPackageJson(project);
+    const {intDir, compDir} = buildIntegration(project, {
+      issuesUrl: 'https://example.com/meta/issues',
+    });
+    fs.writeFileSync(
+      path.join(intDir, 'package.json'),
+      JSON.stringify({
+        name: '@test/meta',
+        version: '1.2.3',
+        exports: {'./styles.css': './styles.css'},
+      }),
+    );
+    fs.writeFileSync(path.join(intDir, 'styles.css'), `.meta {}\n`);
+    fs.writeFileSync(
+      path.join(compDir, 'MetaAppShell.tsx'),
+      [
+        `import '../../styles.css';`,
+        `export function MetaAppShell() { return null; }`,
+        '',
+      ].join('\n'),
+    );
+
+    const result = await runCli(
+      ['--json', 'swizzle', 'MetaAppShell', '-f'],
+      project,
+    );
+    expect(result.code).toBe(0);
+    const env = JSON.parse(result.stdout);
+    const out = fs.readFileSync(
+      path.join(
+        project,
+        'components',
+        'astryx',
+        'MetaAppShell',
+        'MetaAppShell.tsx',
+      ),
+      'utf-8',
+    );
+    expect(out).toContain(`import '@test/meta/styles.css';`);
+    expect(env.data.files.some(f => f.endsWith('styles.css'))).toBe(false);
+  });
+
+  it("refuses to replace an edited owner module in an integration's components folder without --overwrite", async () => {
+    buildFakeCore(project);
+    writeProjectPackageJson(project);
+    const {compDir} = buildIntegration(project, {
+      issuesUrl: 'https://example.com/meta/issues',
+    });
+    const ownerDir = path.join(path.dirname(compDir), 'privateAttributes');
+    fs.mkdirSync(ownerDir, {recursive: true});
+    fs.writeFileSync(
+      path.join(ownerDir, 'row.stylex.ts'),
+      `export const row = 1;\n`,
+    );
+    fs.writeFileSync(
+      path.join(compDir, 'MetaAppShell.tsx'),
+      [
+        `import {row} from '../privateAttributes/row.stylex';`,
+        `export function MetaAppShell() { return row; }`,
+        '',
+      ].join('\n'),
+    );
+    const first = await runCli(['--json', 'swizzle', 'MetaAppShell'], project);
+    expect(first.code).toBe(0);
+    const owner = path.join(
+      project,
+      'components',
+      'astryx',
+      'privateAttributes',
+      'row.stylex.ts',
+    );
+    fs.appendFileSync(owner, '// edited\n');
+    fs.rmSync(path.join(project, 'components', 'astryx', 'MetaAppShell'), {
+      recursive: true,
+      force: true,
+    });
+
+    const again = await runCli(['--json', 'swizzle', 'MetaAppShell'], project);
+    expect(again.code).not.toBe(0);
+    expect(JSON.parse(again.stdout).code).toBe('ERR_FILE_EXISTS');
+    expect(fs.readFileSync(owner, 'utf-8')).toContain('// edited');
   });
 
   it('omits the feedback note when the integration ships no issuesUrl', async () => {
@@ -253,7 +393,10 @@ describe('swizzle — integration-owned components', () => {
     writeProjectPackageJson(project);
     buildIntegration(project, {issuesUrl: null});
 
-    const result = await runCli(['--json', 'swizzle', 'MetaAppShell', '-f'], project);
+    const result = await runCli(
+      ['--json', 'swizzle', 'MetaAppShell', '-f'],
+      project,
+    );
     expect(result.code).toBe(0);
     const env = JSON.parse(result.stdout);
     expect(env.type).toBe('swizzle.copy');
@@ -304,7 +447,9 @@ describe('swizzle — ambiguous ownership', () => {
     expect(out).toContain(`from '../utils/foo'`);
     expect(env.data.files).toContain('../utils/foo.ts');
     expect(
-      fs.existsSync(path.join(project, 'components', 'astryx', 'utils', 'foo.ts')),
+      fs.existsSync(
+        path.join(project, 'components', 'astryx', 'utils', 'foo.ts'),
+      ),
     ).toBe(true);
   });
 
@@ -383,7 +528,10 @@ describe('swizzle — StyleX build setup note (#3373)', () => {
     writeProjectPackageJson(project);
 
     // JSON payload carries the machine-readable flag.
-    const jsonResult = await runCli(['--json', 'swizzle', 'Styled', '-f'], project);
+    const jsonResult = await runCli(
+      ['--json', 'swizzle', 'Styled', '-f'],
+      project,
+    );
     expect(jsonResult.code).toBe(0);
     const env = JSON.parse(jsonResult.stdout);
     expect(env.data.usesStyleX).toBe(true);
@@ -392,7 +540,9 @@ describe('swizzle — StyleX build setup note (#3373)', () => {
     const humanResult = await runCli(['swizzle', 'Styled', '-f'], project);
     expect(humanResult.code).toBe(0);
     expect(humanResult.stdout).toMatch(/StyleX compiler/i);
-    expect(humanResult.stdout).toMatch(/importing them throws "Unexpected 'stylex\.create' call at runtime"/);
+    expect(humanResult.stdout).toMatch(
+      /importing them throws "Unexpected 'stylex\.create' call at runtime"/,
+    );
     expect(humanResult.stdout).not.toMatch(/unstyled/i);
     expect(humanResult.stdout).toMatch(/next\/font/i);
     // The fixture has no `astryx` bin installed, so the note names the scoped package.
@@ -411,7 +561,10 @@ describe('swizzle — StyleX build setup note (#3373)', () => {
     buildStyleXCore(project);
     writeProjectPackageJson(project);
 
-    const jsonResult = await runCli(['--json', 'swizzle', 'Plain', '-f'], project);
+    const jsonResult = await runCli(
+      ['--json', 'swizzle', 'Plain', '-f'],
+      project,
+    );
     expect(jsonResult.code).toBe(0);
     const env = JSON.parse(jsonResult.stdout);
     expect(env.data.usesStyleX).toBe(false);
@@ -427,7 +580,9 @@ describe('swizzle — shared modules outside the component folder (spec:AST-110 
     const core = path.join(project, 'node_modules', '@astryxdesign', 'core');
     const rowDir = path.join(core, 'src', 'Row');
     fs.mkdirSync(rowDir, {recursive: true});
-    fs.mkdirSync(path.join(core, 'src', 'privateAttributes'), {recursive: true});
+    fs.mkdirSync(path.join(core, 'src', 'privateAttributes'), {
+      recursive: true,
+    });
     fs.mkdirSync(path.join(core, 'src', 'motion'), {recursive: true});
     fs.writeFileSync(
       path.join(core, 'package.json'),

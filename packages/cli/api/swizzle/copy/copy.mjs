@@ -354,31 +354,46 @@ export async function swizzleCopy(component, options = {}) {
   // A module above that folder, such as `lib/` beside an integration's
   // `components/`, goes under the output folder by its path in the package.
   /** @param {string} file */
-  const baseDestOf = file => {
+  const layoutDestOf = file => {
     if (isComponentFile(file)) {
       return path.join(outputDir, path.relative(componentDir, file));
     }
     if (file.startsWith(srcRoot + path.sep)) {
       return path.join(layoutRoot, path.relative(srcRoot, file));
     }
-    return path.join(outputBase, path.relative(graphRoot, file));
+    return null;
+  };
+  const allFiles = [...plan.files.keys()];
+  // Such a module takes a folder named after the package when its own path
+  // is a destination of a module in the layout, so two modules never share
+  // one file.
+  const layoutDests = new Set(
+    allFiles.map(layoutDestOf).filter(dest => dest != null),
+  );
+  /** @param {string} file */
+  const baseDestOf = file => {
+    const inLayout = layoutDestOf(file);
+    if (inLayout != null) return inLayout;
+    const byPackagePath = path.join(outputBase, path.relative(graphRoot, file));
+    return layoutDests.has(byPackagePath)
+      ? path.join(outputBase, path.basename(packageDir), path.relative(graphRoot, file))
+      : byPackagePath;
   };
 
-  const allFiles = [...plan.files.keys()];
   const componentFiles = allFiles.filter(isComponentFile);
   const helpers = allFiles.filter(f => !isComponentFile(f));
   // A private attribute owner module and the unexported style modules it
   // imports travel whole and are replaced only with --overwrite.
   const ownerGroup = new Set();
   const ownerQueue = helpers.filter(f =>
-    OWNER_MODULE.test(toModulePath(graphRoot, f)),
+    OWNER_MODULE.test(toModulePath(srcRoot, f)),
   );
   while (ownerQueue.length > 0) {
     const file = /** @type {string} */ (ownerQueue.shift());
     if (ownerGroup.has(file)) continue;
     ownerGroup.add(file);
     for (const dep of plan.dependsOn.get(file) ?? []) {
-      if (!isComponentFile(dep) && STYLEX_MODULE.test(toModulePath(graphRoot, dep))) {
+      if (!isComponentFile(dep) && STYLEX_MODULE.test(toModulePath(srcRoot, dep))) {
         ownerQueue.push(dep);
       }
     }

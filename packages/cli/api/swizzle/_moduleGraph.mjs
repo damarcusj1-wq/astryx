@@ -471,8 +471,9 @@ export function planCopy({
         else edits.push(sourceEdit(parsed.code, ref, carry(file, target)));
         continue;
       }
-      if (!inSource(target)) {
-        // An asset beside the source root, such as `../../locales/en.json`.
+      if (!CODE_FILE.test(target) || !inSource(target)) {
+        // An asset, such as `../../locales/en.json` or a stylesheet, that the
+        // package exports by its own path is imported from the package.
         const subpath = `./${toPosix(path.relative(packageDir, target))}`;
         if (
           subpathDeclaration(surface.exportsField, subpath).state === 'declared'
@@ -480,7 +481,12 @@ export function planCopy({
           edits.push(
             sourceEdit(parsed.code, ref, `${ownerPackage}/${subpath.slice(2)}`),
           );
+          continue;
         }
+        // An unexported asset in the source is carried; one outside it is
+        // left for the build to report.
+        if (!inSource(target)) continue;
+        edits.push(sourceEdit(parsed.code, ref, carry(file, target)));
         continue;
       }
       edits.push(planReference(file, parsed.code, ref, target));
