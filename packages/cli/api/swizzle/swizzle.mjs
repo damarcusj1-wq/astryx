@@ -16,9 +16,7 @@
  */
 
 import {swizzleList} from './list/list.mjs';
-import {swizzleCopy, rewriteImports} from './copy/copy.mjs';
-
-export {rewriteImports};
+import {swizzleCopy} from './copy/copy.mjs';
 
 /**
  * List swizzlable components, or copy one component's source for customization.

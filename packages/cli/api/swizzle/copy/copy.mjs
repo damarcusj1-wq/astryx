@@ -17,6 +17,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   checkGhCli,
+  planCopy,
+  relativeSpecifierBetween,
+  renderFile,
   resolveComponentReplacement,
   resolveCore,
 } from '../_adapter.mjs';
@@ -35,212 +38,82 @@ import {AstryxError, writeFailed} from '../../error.mjs';
 /** Default issue tracker for maintainer feedback after swizzling. */
 const DEFAULT_ISSUES_URL = 'https://github.com/meta/astryx/issues/new';
 
-/**
- * Rewrite relative imports that point outside the component directory to use
- * the OWNER package's subpaths. Imports within the copied directory (./x) are
- * left untouched.
- *
- * e.g. with ownerPackage '@astryxdesign/core':
- *      '../theme/tokens.stylex' -> '@astryxdesign/core/theme/tokens.stylex'
- *      '../utils/mergeProps'     -> '@astryxdesign/core/utils'
- *      '../../locales/en.json'   -> '@astryxdesign/core/locales/en.json'
- *      import('../Tooltip/Tooltip') -> import('@astryxdesign/core/Tooltip')
- *
- * Most sibling dirs are barrels, so the top-dir collapse (`../utils/x` ->
- * `<pkg>/utils`) resolves. Two shapes must NOT be collapsed to the top dir:
- *   - Asset files (`.json`, `.css`): exported by full subpath (e.g.
- *     `./locales/*.json`, `./reset.css`), and collapsing a two-levels-up
- *     `../../locales/x.json` would emit the invalid `<pkg>/..`.
- *   - StyleX modules (`*.stylex`): the StyleX compiler needs the real module
- *     path so it can resolve the styles at compile time. The barrel re-export
- *     loses the module identity. Core exports every `.stylex` file by its
- *     deep subpath (e.g. `./utils/focusOutline.stylex`,
- *     `./theme/tokens.stylex`).
- *
- * @param {string} content
- * @param {string} [ownerPackage]
- * @param {(importPath: string) => boolean} [keep] Imports to leave relative:
- *   the modules the copy carries in the same layout (see `sharedModulesOf`).
- */
-export function rewriteImports(content, ownerPackage = CORE_PACKAGE, keep = () => false) {
-  /** @param {string} importPath */
-  const mapTarget = importPath => {
-    // A module the copy carries beside the component keeps its relative path.
-    if (keep(importPath)) {
-      return importPath;
-    }
-    // Strip ALL leading `../` so a two-levels-up path never yields `<pkg>/..`.
-    const rest = importPath.replace(/^(?:\.\.\/)+/, '');
-    const parts = rest.split('/');
-    const last = parts[parts.length - 1];
-    // Asset files are resolved by exact export / wildcard, never a barrel.
-    if (/\.(?:json|css)$/.test(last)) {
-      return `${ownerPackage}/${rest}`;
-    }
-    // StyleX modules need the deep path so the compiler can resolve them.
-    if (/\.stylex(?:\.[cm]?[jt]sx?)?$/.test(last)) {
-      return `${ownerPackage}/${rest}`;
-    }
-    return `${ownerPackage}/${parts[0]}`;
-  };
-  return content
-    .replace(
-      /(from\s+['"])(\.\.\/[^'"]+)(['"])/g,
-      (_m, prefix, importPath, suffix) =>
-        `${prefix}${mapTarget(importPath)}${suffix}`,
-    )
-    .replace(
-      /(import\(\s*['"])(\.\.\/[^'"]+)(['"])/g,
-      (_m, prefix, importPath, suffix) =>
-        `${prefix}${mapTarget(importPath)}${suffix}`,
-    );
-}
-
 /** A private data attribute's owner module (`architecture:public-component-api` INV23). */
 const OWNER_MODULE = /^privateAttributes\/[^/]+\.stylex$/;
 /** A StyleX module, with or without its file extension. */
 const STYLEX_MODULE = /\.stylex(?:\.[cm]?[jt]sx?)?$/;
-/** The extensions an extensionless import may name, in resolution order. */
-const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mjs', '.js'];
+/**
+ * The nearest folder at or above `dir` that holds a package.json.
+ * @param {string} dir
+ */
+function packageDirOf(dir) {
+  for (let current = dir; ; current = path.dirname(current)) {
+    if (fs.existsSync(path.join(current, 'package.json'))) return current;
+    if (path.dirname(current) === current) return dir;
+  }
+}
+
+/** @param {string} packageDir */
+function packageVersionOf(packageDir) {
+  try {
+    return String(JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf-8')).version ?? '0');
+  } catch {
+    return '0';
+  }
+}
 
 /**
- * The relative import specifiers in a module's source.
- * @param {string} content
+ * Where a component's module graph starts: its folder's index, or else every
+ * source file at the top of the folder.
+ * @param {string} componentDir
  * @returns {string[]}
  */
-function relativeImportsOf(content) {
-  const found = [];
-  for (const re of [
-    /from\s+['"](\.\.?\/[^'"]+)['"]/g,
-    /import\(\s*['"](\.\.?\/[^'"]+)['"]/g,
-  ]) {
-    for (const m of content.matchAll(re)) found.push(m[1]);
+function entryFilesOf(componentDir) {
+  for (const name of ['index.ts', 'index.tsx', 'index.mjs', 'index.js']) {
+    const file = path.join(componentDir, name);
+    if (fs.existsSync(file)) return [file];
   }
-  return found;
+  return fs
+    .readdirSync(componentDir)
+    .filter(f => /\.[cm]?[jt]sx?$/.test(f) && !/\.(?:test|spec|stories|doc)\./.test(f) && !/\.d\.[cm]?ts$/.test(f))
+    .map(f => path.join(componentDir, f))
+    .filter(f => fs.statSync(f).isFile());
 }
 
 /**
- * The source file an import resolves to under `srcRoot`, as a path relative to
- * `srcRoot` without its extension (`privateAttributes/press.stylex`), and the
- * file's own relative path; null when it resolves outside `srcRoot` or to no
- * file.
+ * A module path relative to the source root, without its extension.
  * @param {string} srcRoot
- * @param {string} fromDir directory of the importing file, relative to srcRoot
- * @param {string} importPath
- * @returns {{module: string, file: string} | null}
+ * @param {string} file
  */
-function resolveSourceModule(srcRoot, fromDir, importPath) {
-  const module = path.posix.normalize(path.posix.join(fromDir, importPath));
-  if (module.startsWith('..') || path.posix.isAbsolute(module)) return null;
-  for (const ext of ['', ...SOURCE_EXTENSIONS]) {
-    const file = module + ext;
-    const abs = path.join(srcRoot, file);
-    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-      return {
-        module: ext ? module : module.replace(/\.[cm]?[jt]sx?$/, ''),
-        file,
-      };
-    }
-  }
-  return null;
+function toModulePath(srcRoot, file) {
+  return toPosix(path.relative(srcRoot, file)).replace(/\.[cm]?[jt]sx?$/, '');
+}
+
+/** @param {string} file */
+function toPosix(file) {
+  return file.split(path.sep).join('/');
 }
 
 /**
- * The subpaths the owner package exports (`./theme/tokens.stylex`), read from
- * the nearest package.json above its source root.
- * @param {string} srcRoot
- * @returns {Set<string>}
+ * @param {string} target
+ * @param {string} root
  */
-function exportedSubpathsOf(srcRoot) {
-  let dir = srcRoot;
-  for (;;) {
-    const manifest = path.join(dir, 'package.json');
-    if (fs.existsSync(manifest)) {
-      try {
-        const {exports} = JSON.parse(fs.readFileSync(manifest, 'utf-8'));
-        return new Set(
-          exports && typeof exports === 'object' ? Object.keys(exports) : [],
-        );
-      } catch {
-        return new Set();
-      }
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) return new Set();
-    dir = parent;
-  }
+function isWithin(target, root) {
+  const rel = path.relative(root, target);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 /**
- * The modules a copy carries beside the component, in the package's own
- * layout under the output directory (`spec:AST-110` FR4): each private
- * attribute owner module the component imports, and every unexported StyleX
- * module such a carried module imports, transitively. The component's own
- * imports of them, and theirs of each other, stay relative.
- *
- * @param {string} srcRoot the owner package's source root
- * @param {string} componentDir
- * @param {string[]} componentFiles files of the component that are copied
- * @returns {Map<string, string>} module path (relative to srcRoot, no
- *   extension) -> its file path relative to srcRoot
+ * A helper's file name with the owner version before its extension:
+ * `layerStack.ts` -> `layerStack.v0.7.9.ts`, or `layerStack.v0.7.9-2.ts`.
+ * @param {string} dest
+ * @param {string} version
+ * @param {number} n
  */
-export function sharedModulesOf(srcRoot, componentDir, componentFiles) {
-  const exported = exportedSubpathsOf(srcRoot);
-  const componentRel = path
-    .relative(srcRoot, componentDir)
-    .split(path.sep)
-    .join('/');
-  /** @type {Map<string, string>} */
-  const carried = new Map();
-  /** @type {Array<{fromDir: string, content: string, owner: boolean}>} */
-  const queue = componentFiles
-    .filter(f => /\.[cm]?[jt]sx?$/.test(f))
-    .map(f => ({
-      fromDir: componentRel,
-      content: fs.readFileSync(path.join(componentDir, f), 'utf-8'),
-      owner: false,
-    }));
-  while (queue.length > 0) {
-    const {fromDir, content, owner} = /** @type {typeof queue[number]} */ (
-      queue.shift()
-    );
-    for (const importPath of relativeImportsOf(content)) {
-      const target = resolveSourceModule(srcRoot, fromDir, importPath);
-      if (target == null || carried.has(target.module)) continue;
-      if (target.module.startsWith(componentRel + '/')) continue;
-      const isOwner = OWNER_MODULE.test(target.module);
-      // A carried module's unexported StyleX dependency travels with it; a
-      // component's own imports of other modules are rewritten as before.
-      const isPrivateStyle =
-        owner &&
-        STYLEX_MODULE.test(target.module) &&
-        !exported.has(`./${target.module}`);
-      if (!isOwner && !isPrivateStyle) continue;
-      carried.set(target.module, target.file);
-      queue.push({
-        fromDir: path.posix.dirname(target.module),
-        content: fs.readFileSync(path.join(srcRoot, target.file), 'utf-8'),
-        owner: true,
-      });
-    }
-  }
-  return carried;
-}
-
-/**
- * A `keep` predicate for `rewriteImports`: true for an import that names one
- * of the carried modules from a file in `fromDir`.
- * @param {Map<string, string>} carried
- * @param {string} fromDir relative to the source root
- * @returns {(importPath: string) => boolean}
- */
-function keepCarried(carried, fromDir) {
-  return importPath => {
-    const module = path.posix
-      .normalize(path.posix.join(fromDir, importPath))
-      .replace(/\.[cm]?[jt]sx?$/, '');
-    return carried.has(module);
-  };
+function versionedPath(dest, version, n) {
+  const ext = /(\.stylex)?\.[cm]?[jt]sx?$/.exec(dest)?.[0] ?? path.extname(dest);
+  const stem = dest.slice(0, dest.length - ext.length);
+  return `${stem}.v${version}${n > 1 ? `-${n}` : ''}${ext}`;
 }
 
 /**
@@ -339,12 +212,6 @@ function confineWrite(target, cwd, options) {
   }
 }
 
-/** @param {string} file */
-function isExcludedFromCopy(file) {
-  return (
-    file.includes('.test.') || file.includes('.doc.') || file === 'README.md'
-  );
-}
 
 /**
  * Copy one component's source into the consumer project for customization,
@@ -459,58 +326,116 @@ export async function swizzleCopy(component, options = {}) {
   // writes anything.
   const feedback = buildFeedback(dirName, owner.issuesUrl);
 
-  // Pre-flight path and overwrite checks before any mkdir/writeFile.
-  const sourceFiles = fs.readdirSync(componentDir).filter(file => {
-    if (isExcludedFromCopy(file)) return false;
-    return fs.statSync(path.join(componentDir, file)).isFile();
+  // The copy follows the component's module graph.
+  const packageDir = packageDirOf(componentDir);
+  const packageSrc = path.join(packageDir, 'src');
+  const srcRoot = componentDir.startsWith(packageSrc + path.sep)
+    ? packageSrc
+    : path.dirname(componentDir);
+  const plan = planCopy({
+    packageDir,
+    srcRoot,
+    componentDir,
+    ownerPackage: owner.ownerPackage,
+    entries: entryFilesOf(componentDir),
   });
-  for (const file of sourceFiles) {
-    confineWrite(path.join(outputDir, file), cwd, {
-      allowAbsolute: true,
-      label: 'output file',
-    });
-  }
-  // The owner modules the component imports, and their unexported StyleX
-  // dependencies, travel with it in the package's layout (spec:AST-110 FR4).
-  const srcRoot = path.dirname(componentDir);
-  const componentRel = path
-    .relative(srcRoot, componentDir)
-    .split(path.sep)
-    .join('/');
-  const carried = sharedModulesOf(srcRoot, componentDir, sourceFiles);
-  const shared = [...carried.values()].map(file => {
-    const content = rewriteImports(
-      fs.readFileSync(path.join(srcRoot, file), 'utf-8'),
-      owner.ownerPackage,
-      keepCarried(carried, path.posix.dirname(file)),
-    );
-    const dest = confineWrite(path.join(outputBase, file), cwd, {
-      allowAbsolute: true,
-      label: 'output file',
-    });
-    // Something that is not a readable file in its place counts as changed.
-    let existing = null;
-    if (fs.existsSync(dest)) {
-      try {
-        existing = fs.readFileSync(dest, 'utf-8');
-      } catch {
-        existing = '';
+  const ownerVersion = packageVersionOf(packageDir);
+
+  // Carried modules keep the package's layout around the component folder.
+  const depth = path.relative(srcRoot, componentDir).split(path.sep).length;
+  const shiftedRoot = path.resolve(outputDir, ...Array(depth).fill('..'));
+  const layoutRoot = isWithin(shiftedRoot, outputBase) ? shiftedRoot : outputBase;
+  /** @param {string} file */
+  const isComponentFile = file => file.startsWith(componentDir + path.sep);
+  /** @param {string} file */
+  const baseDestOf = file =>
+    isComponentFile(file)
+      ? path.join(outputDir, path.relative(componentDir, file))
+      : path.join(layoutRoot, path.relative(srcRoot, file));
+
+  const allFiles = [...plan.files.keys()];
+  const componentFiles = allFiles.filter(isComponentFile);
+  const helpers = allFiles.filter(f => !isComponentFile(f));
+  // A private attribute owner module and the unexported style modules it
+  // imports travel whole and are replaced only with --overwrite.
+  const ownerGroup = new Set();
+  const ownerQueue = helpers.filter(f =>
+    OWNER_MODULE.test(toModulePath(srcRoot, f)),
+  );
+  while (ownerQueue.length > 0) {
+    const file = /** @type {string} */ (ownerQueue.shift());
+    if (ownerGroup.has(file)) continue;
+    ownerGroup.add(file);
+    for (const dep of plan.dependsOn.get(file) ?? []) {
+      if (!isComponentFile(dep) && STYLEX_MODULE.test(toModulePath(srcRoot, dep))) {
+        ownerQueue.push(dep);
       }
     }
-    // A copy another component's swizzle already wrote is reused when it is
-    // the same; a changed one is a file this run would overwrite.
+  }
+
+  /** @type {Map<string, string>} helper -> the file it is written to instead */
+  const redirected = new Map();
+  /** @param {string} file */
+  const destOf = file => redirected.get(file) ?? baseDestOf(file);
+  /** @param {string} file */
+  const render = file =>
+    renderFile(/** @type {any} */ (plan.files.get(file)), choice =>
+      typeof choice === 'string'
+        ? choice
+        : relativeSpecifierBetween(destOf(choice.from), destOf(choice.to)),
+    );
+  /** @param {string} dest */
+  const readExisting = dest => {
+    if (!fs.existsSync(dest)) return null;
+    try {
+      return fs.readFileSync(dest, 'utf-8');
+    } catch {
+      return '';
+    }
+  };
+  // A helper an earlier swizzle wrote is reused when it is the same. A
+  // different one is never overwritten: this copy writes its own under a
+  // version-suffixed name, and so does every helper that imports it.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const file of helpers) {
+      if (ownerGroup.has(file) || redirected.has(file)) continue;
+      const existing = readExisting(baseDestOf(file));
+      if (existing != null && existing !== render(file)) {
+        redirected.set(file, versionedPath(baseDestOf(file), ownerVersion, 1));
+        changed = true;
+      }
+    }
+  }
+  for (const file of redirected.keys()) {
+    for (let n = 1; ; n++) {
+      const dest = versionedPath(baseDestOf(file), ownerVersion, n);
+      redirected.set(file, dest);
+      const existing = readExisting(dest);
+      if (existing == null || existing === render(file)) break;
+    }
+  }
+
+  // The component's own files come first, then the helpers it carries.
+  const outputs = [...componentFiles, ...helpers].map(file => {
+    const dest = confineWrite(destOf(file), cwd, {
+      allowAbsolute: true,
+      label: 'output file',
+    });
+    const content = render(file);
+    const existing = readExisting(dest);
     return {
       file,
       dest,
       content,
-      unchanged: existing === content,
+      component: isComponentFile(file),
+      owner: ownerGroup.has(file),
       exists: existing != null,
+      unchanged: existing === content,
     };
   });
-  const existingFiles = sourceFiles.filter(f =>
-    fs.existsSync(path.join(outputDir, f)),
-  );
-  const changedShared = shared.filter(s => s.exists && !s.unchanged);
+  const existingFiles = outputs.filter(o => o.component && o.exists);
+  const changedShared = outputs.filter(o => o.owner && o.exists && !o.unchanged);
   if ((existingFiles.length > 0 || changedShared.length > 0) && !overwrite) {
     const relOutputForMsg = path.relative(cwd, outputDir) || '.';
     const sharedNote =
@@ -527,109 +452,47 @@ export async function swizzleCopy(component, options = {}) {
     );
   }
 
-
   const outputDirExisted = fs.existsSync(outputDir);
-  try {
-    fs.mkdirSync(outputDir, {recursive: true});
-  } catch (err) {
-    throw writeFailed(outputDir, cwd, err);
-  }
-
-  const files = fs.readdirSync(componentDir);
-  let copied = 0;
-  let usesStyleX = false;
-  // A copy that fails part-way undoes what it already wrote, so the report is
-  // true and a retry does not trip over half a component. Each entry keeps
-  // the bytes the file had before this run (null when the copy created it).
+  /** @type {string[]} folders this run created, outermost first */
+  const createdDirs = [];
   /** @type {Array<{dest: string, original: Buffer|null}>} */
   const written = [];
-  for (const file of files) {
-    if (isExcludedFromCopy(file)) continue;
-    const srcPath = path.join(componentDir, file);
-    if (!fs.statSync(srcPath).isFile()) continue;
-    let content = fs.readFileSync(srcPath, 'utf-8');
-    if (file.endsWith('.ts') || file.endsWith('.tsx')) {
-      content = rewriteImports(content, owner.ownerPackage, keepCarried(carried, componentRel));
-    }
-    if (
-      (file.endsWith('.ts') || file.endsWith('.tsx')) &&
-      content.includes('@stylexjs/stylex')
-    ) {
-      usesStyleX = true;
-    }
-    const dest = path.join(outputDir, file);
-    try {
-      // The snapshot read is guarded too: a destination that cannot be read
-      // back (no permission, or a directory with this name) must still undo
-      // the earlier writes and report ERR_WRITE_FAILED.
-      const original = fs.existsSync(dest) ? fs.readFileSync(dest) : null;
-      written.push({dest, original});
-      fs.writeFileSync(dest, content);
-    } catch (err) {
-      const unrestored = undoCopy(written);
-      if (!outputDirExisted) {
-        try {
-          fs.rmdirSync(outputDir);
-        } catch {
-          // Not empty (something could not be undone), or already gone.
-        }
-      }
-      throw writeFailed(dest, cwd, err, unrestored);
-    }
-    copied++;
-  }
-
-  /** @type {string[]} folders this run created for carried modules, outermost first */
-  const createdDirs = [];
-  for (const module of shared) {
-    // An identical copy is already in place: it is part of this copy, unwritten.
-    if (module.unchanged) {
+  let copied = 0;
+  for (const output of outputs) {
+    // An identical file is already in place: it is part of this copy, unwritten.
+    if (output.unchanged) {
       copied++;
       continue;
     }
     try {
-      const original = fs.existsSync(module.dest)
-        ? fs.readFileSync(module.dest)
-        : null;
-      const firstCreated = fs.mkdirSync(path.dirname(module.dest), {recursive: true});
+      const original = fs.existsSync(output.dest) ? fs.readFileSync(output.dest) : null;
+      const firstCreated = fs.mkdirSync(path.dirname(output.dest), {recursive: true});
       if (firstCreated != null) createdDirs.push(firstCreated);
-      written.push({dest: module.dest, original});
-      fs.writeFileSync(module.dest, module.content);
+      written.push({dest: output.dest, original});
+      fs.writeFileSync(output.dest, output.content);
       copied++;
     } catch (err) {
       const unrestored = undoCopy(written);
-      // Remove the folders this run created, as a failed component-file write
-      // does, so a retry finds the output as it was.
       for (const dir of [...createdDirs].reverse()) {
         fs.rmSync(dir, {recursive: true, force: true});
       }
       if (!outputDirExisted) {
         fs.rmSync(outputDir, {recursive: true, force: true});
       }
-      throw writeFailed(module.dest, cwd, err, unrestored);
+      throw writeFailed(output.dest, cwd, err, unrestored);
     }
   }
-  if (shared.length > 0) usesStyleX = true;
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, {recursive: true});
 
   const relOutput = path.relative(cwd, outputDir);
-  const copiedFiles = files.filter(
-    f =>
-      !isExcludedFromCopy(f) &&
-      fs.statSync(path.join(componentDir, f)).isFile(),
-  );
   /** @type {import('../swizzle.type.mjs').SwizzleCopyResponse['data']} */
   const data = {
     component: dirName,
     package: owner.package,
     outputDir: relOutput,
     filesCopied: copied,
-    // The owner modules and their unexported style dependencies the copy
-    // carries beside the component (spec:AST-110 FR4) are its files too.
-    files: [
-      ...copiedFiles.map(f => f),
-      ...shared.map(m => path.relative(outputDir, m.dest).split(path.sep).join('/')),
-    ],
-    usesStyleX,
+    files: outputs.map(o => toPosix(path.relative(outputDir, o.dest))),
+    usesStyleX: outputs.some(o => o.content.includes('@stylexjs/stylex')),
   };
   if (feedback) data.feedback = feedback;
   return {type: 'swizzle.copy', package: data.package, data};

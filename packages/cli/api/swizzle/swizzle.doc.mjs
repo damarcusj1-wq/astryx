@@ -17,8 +17,10 @@ export const doc = {
   description:
     "Ejects a component's source into the consumer project for deep customization. " +
     'It copies from the locally resolved @astryxdesign/core (or the owning integration) ' +
-    'package source, rewriting imports that escape the component directory to the owner ' +
-    "package's subpaths and flagging whether any copied file uses StyleX. With no name " +
+    'package source. The copy builds on its own: names the owner package exports are ' +
+    'imported from its public paths, and every internal module the component needs is ' +
+    "copied beside it in the package's folder layout. Tests, stories and docs are not " +
+    'copied. The receipt flags whether any copied file uses StyleX. With no name ' +
     '(or list) it returns the swizzlable component names instead. An integration ' +
     'component that replaces a Core component is what that Core name copies; ' +
     "options.package '@astryxdesign/core' copies the original. The list names Core " +
@@ -63,7 +65,8 @@ export const doc = {
     {
       name: 'options.overwrite',
       type: 'boolean',
-      description: 'Overwrite existing files instead of erroring.',
+      description:
+        "Replace the component's existing files instead of erroring. A helper an earlier swizzle wrote is never replaced: a different one stays, and the new copy writes its own under a version-suffixed name.",
       default: 'false',
     },
   ],
@@ -76,7 +79,7 @@ export const doc = {
     {
       type: 'swizzle.copy',
       description:
-        'A receipt after copying the component into the project: the component name, owning package, output directory, files-copied count, the copied file names (relative to the component folder, including the private attribute owner modules and their unexported style modules copied beside it, e.g. `../privateAttributes/press.stylex.ts`), whether any file uses StyleX, and, when the owner has an issues URL, feedback ({issuesUrl, ghCommand?}): where to report the gap that led to swizzling.',
+        'A receipt after copying the component into the project: the component name, owning package, output directory, files-copied count, the copied file names (relative to the component folder; the internal modules copied beside it start with `../`, e.g. `../InputGroup/groupStyles.ts`), whether any file uses StyleX, and, when the owner has an issues URL, feedback ({issuesUrl, ghCommand?}): where to report the gap that led to swizzling.',
     },
   ],
   throws: [

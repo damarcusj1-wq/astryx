@@ -3,9 +3,9 @@
 /**
  * @file Integration-routing tests for `astryx swizzle`.
  *
- * `rewriteImports` is unit-tested in swizzle.test.mjs. These tests exercise the
- * end-to-end command behavior by running the CLI in-process against hermetic
- * fixtures: a fake @astryxdesign/core under node_modules plus, for the
+ * The copy's module graph is tested in api/swizzle/copy/copy.test.mjs. These
+ * tests exercise the end-to-end command behavior by running the CLI in-process
+ * against hermetic fixtures: a fake @astryxdesign/core under node_modules plus, for the
  * integration cases, a configured integration package (astryx.config.mjs +
  * astryx.integration.mjs + a `components` dir) — all under node_modules so the
  * config/manifest loaders resolve normally.
@@ -27,7 +27,8 @@ const CORE_PACKAGE = path.resolve(
 
 /**
  * Build a fake @astryxdesign/core under <project>/node_modules with a single
- * swizzleable Button component (bare `Button.tsx`, no doc).
+ * swizzleable Button component (bare `Button.tsx`, no doc) that imports an
+ * exported StyleX module.
  */
 function buildFakeCore(project) {
   const core = path.join(project, 'node_modules', '@astryxdesign', 'core');
@@ -35,7 +36,21 @@ function buildFakeCore(project) {
   fs.mkdirSync(buttonDir, {recursive: true});
   fs.writeFileSync(
     path.join(core, 'package.json'),
-    '{"name":"@astryxdesign/core","version":"0.0.13"}',
+    JSON.stringify({
+      name: '@astryxdesign/core',
+      version: '0.0.13',
+      exports: {
+        './theme/tokens.stylex': {
+          source: './src/theme/tokens.stylex.ts',
+          default: './dist/theme/tokens.stylex.js',
+        },
+      },
+    }),
+  );
+  fs.mkdirSync(path.join(core, 'src', 'theme'), {recursive: true});
+  fs.writeFileSync(
+    path.join(core, 'src', 'theme', 'tokens.stylex.ts'),
+    `export const tokens = {};\n`,
   );
   fs.writeFileSync(
     path.join(buttonDir, 'Button.tsx'),
@@ -55,8 +70,8 @@ function buildFakeCore(project) {
 
 /**
  * Build a configured integration package `@test/meta` under
- * <project>/node_modules with a same-stem component (source + doc) and an
- * escaping import, plus a colocated test file. Writes astryx.config.mjs at the
+ * <project>/node_modules with a same-stem component (source + doc) that
+ * imports an unexported helper beside its folder, plus a colocated test file. Writes astryx.config.mjs at the
  * project root listing the integration.
  *
  * @param {string} project
@@ -89,6 +104,12 @@ function buildIntegration(project, {issuesUrl, componentName = 'MetaAppShell'} =
   fs.writeFileSync(
     path.join(compDir, 'sibling.ts'),
     `export const sib = 1;\n`,
+  );
+  // An unexported helper beside the component folder.
+  fs.mkdirSync(path.join(compRoot, 'utils'), {recursive: true});
+  fs.writeFileSync(
+    path.join(compRoot, 'utils', 'foo.ts'),
+    `export default 1;\n`,
   );
   fs.writeFileSync(
     path.join(compDir, `${componentName}.doc.mjs`),
@@ -161,7 +182,7 @@ describe('swizzle — core feedback routing via config', () => {
 });
 
 describe('swizzle — integration-owned components', () => {
-  it('copies the component dir (excluding test/doc), rewrites escaping imports to the owner package, routes feedback to the integration issuesUrl', async () => {
+  it('copies the component and the unexported helper it imports, without its test or doc, and routes feedback to the integration issuesUrl', async () => {
     buildFakeCore(project);
     writeProjectPackageJson(project);
     buildIntegration(project, {issuesUrl: 'https://example.com/meta/issues'});
@@ -182,7 +203,12 @@ describe('swizzle — integration-owned components', () => {
     const outDir = path.join(project, 'components', 'astryx', 'MetaAppShell');
     expect(fs.existsSync(path.join(outDir, 'MetaAppShell.doc.mjs'))).toBe(false);
     const out = fs.readFileSync(path.join(outDir, 'MetaAppShell.tsx'), 'utf-8');
-    expect(out).toContain(`from '@test/meta/utils'`);
+    // The helper is not exported, so the copy carries it in the same layout.
+    expect(out).toContain(`from '../utils/foo'`);
+    expect(env.data.files).toContain('../utils/foo.ts');
+    expect(
+      fs.existsSync(path.join(project, 'components', 'astryx', 'utils', 'foo.ts')),
+    ).toBe(true);
     expect(out).toContain(`from './sibling'`);
   });
 
@@ -238,7 +264,12 @@ describe('swizzle — ambiguous ownership', () => {
       path.join(project, 'components', 'astryx', 'Button', 'Button.tsx'),
       'utf-8',
     );
-    expect(out).toContain(`from '@test/meta/utils'`);
+    // The helper is not exported, so the copy carries it in the same layout.
+    expect(out).toContain(`from '../utils/foo'`);
+    expect(env.data.files).toContain('../utils/foo.ts');
+    expect(
+      fs.existsSync(path.join(project, 'components', 'astryx', 'utils', 'foo.ts')),
+    ).toBe(true);
   });
 
   it('--package resolves an ambiguous name to core', async () => {
@@ -275,7 +306,21 @@ function buildStyleXCore(project) {
   fs.mkdirSync(styledDir, {recursive: true});
   fs.writeFileSync(
     path.join(core, 'package.json'),
-    '{"name":"@astryxdesign/core","version":"0.0.13"}',
+    JSON.stringify({
+      name: '@astryxdesign/core',
+      version: '0.0.13',
+      exports: {
+        './theme/tokens.stylex': {
+          source: './src/theme/tokens.stylex.ts',
+          default: './dist/theme/tokens.stylex.js',
+        },
+      },
+    }),
+  );
+  fs.mkdirSync(path.join(core, 'src', 'theme'), {recursive: true});
+  fs.writeFileSync(
+    path.join(core, 'src', 'theme', 'tokens.stylex.ts'),
+    `export const tokens = {};\n`,
   );
   fs.writeFileSync(
     path.join(styledDir, 'Styled.tsx'),

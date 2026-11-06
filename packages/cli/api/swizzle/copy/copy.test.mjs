@@ -301,6 +301,10 @@ describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
    * `exports`. Only unresolved modules and missing exports count here.
    */
   const unresolvedImportsIn = files => {
+    // The product installs Core; the copy resolves it from its own folder.
+    const link = path.join(out(), 'node_modules/@astryxdesign/core');
+    fs.mkdirSync(path.dirname(link), {recursive: true});
+    fs.symlinkSync(CORE, link, 'dir');
     const program = ts.createProgram(files, {
       target: ts.ScriptTarget.ES2022,
       module: ts.ModuleKind.ESNext,
@@ -313,10 +317,20 @@ describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
       resolveJsonModule: true,
     });
     const RESOLUTION = new Set([2305, 2307, 2614, 2724, 1192]);
+    const productInstalls = [
+      'react',
+      '@stylexjs/stylex',
+      ...Object.keys(
+        JSON.parse(fs.readFileSync(path.join(CORE, 'package.json'), 'utf-8'))
+          .dependencies ?? {},
+      ),
+    ];
     return files.flatMap(file =>
       program
         .getSemanticDiagnostics(program.getSourceFile(file))
         .filter(d => RESOLUTION.has(d.code))
+        // The product installs React, StyleX and Core's own dependencies.
+        .filter(d => !productInstalls.some(name => ts.flattenDiagnosticMessageText(d.messageText, ' ').includes(`'${name}'`) || ts.flattenDiagnosticMessageText(d.messageText, ' ').includes(`'${name}/`)))
         .map(d => `${path.relative(out(), file)}: TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`),
     );
   };
@@ -336,7 +350,7 @@ describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
       );
       expect(r.data.filesCopied).toBe(r.data.files.length);
       const files = filesUnder(out())
-        .filter(rel => /\.tsx?$/.test(rel))
+        .filter(rel => /\.tsx?$/.test(rel) && !rel.startsWith('node_modules'))
         .map(rel => path.join(out(), rel));
       for (const file of files) {
         for (const {specifier} of importsOf(file)) {
@@ -404,7 +418,7 @@ describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
       const original = fs.readFileSync(helper, 'utf-8');
 
       // An identical helper is part of the next copy, unwritten.
-      const second = await swizzle('IconButton', {cwd: REPO, output: './' + GRAPH_OUT});
+      const second = await swizzle('TextInput', {cwd: REPO, output: './' + GRAPH_OUT});
       expect(second.data.files).toContain('../InputGroup/groupStyles.ts');
 
       // A changed helper stays as the product left it, even with --overwrite.
@@ -426,7 +440,7 @@ describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
         fs.readFileSync(path.join(out(), 'Button/Button.tsx'), 'utf-8'),
       ).toContain(`from '../InputGroup/groupStyles.v${version}'`);
       expect(
-        fs.readFileSync(path.join(out(), 'IconButton/IconButton.tsx'), 'utf-8'),
+        fs.readFileSync(path.join(out(), 'TextInput/TextInput.tsx'), 'utf-8'),
       ).not.toContain(`groupStyles.v${version}`);
     },
     SLOW,
