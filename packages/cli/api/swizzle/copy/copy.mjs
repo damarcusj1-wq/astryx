@@ -2,13 +2,14 @@
 
 /**
  * @file swizzle.copy leaf — copy a component's source into the consumer project
- * for customization, rewriting escaping relative imports to the OWNER package's
- * subpaths.
+ * for customization: what the OWNER package exports is imported from it, and
+ * every internal module the component needs is copied beside it.
  *
  * Side-effecting: writes files and returns a `swizzle.copy` receipt describing
- * what it did. Shared core discovery + component listing come from
- * api/swizzle/_adapter.mjs; everything here (owner resolution, the copy, import
- * rewriting, StyleX detection, maintainer feedback) is copy-specific. Errors
+ * what it did. Shared core discovery, component listing and the module graph
+ * (which modules the copy holds and how each import reads) come from
+ * api/swizzle/_adapter.mjs; owner resolution, where each file lands, reuse of
+ * existing helpers, StyleX detection and maintainer feedback are here. Errors
  * throw AstryxError (stable code + suggestions). All human prose /
  * package-manager prefixing lives in the CLI renderer.
  */
@@ -212,10 +213,10 @@ function confineWrite(target, cwd, options) {
   }
 }
 
-
 /**
  * Copy one component's source into the consumer project for customization,
- * rewriting escaping relative imports to the owner package's subpaths.
+ * with the internal modules it needs and its imports of the owner package's
+ * public paths.
  *
  * @param {string} component bare or XDS-prefixed component name
  * @param {{cwd?: string, output?: string, package?: string, overwrite?: boolean}} [options]

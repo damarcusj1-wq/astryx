@@ -9,10 +9,8 @@
  *   - a component name          -> api/swizzle/copy -> `swizzle.copy` receipt
  *
  * Errors throw AstryxError (stable code + suggestions). All human prose /
- * package-manager prefixing lives in the CLI renderer. Re-exports the copy
- * leaf's `rewriteImports` so existing importers keep this module as their entry
- * point (api/index.mjs, the CLI command, and the unit tests all import from
- * here).
+ * package-manager prefixing lives in the CLI renderer. api/index.mjs, the CLI
+ * command, and the unit tests import `swizzle` from here.
  */
 
 import {swizzleList} from './list/list.mjs';
