@@ -16,9 +16,10 @@ export const doc = {
   summary: 'Copy component source for customization',
   description:
     "Ejects a component's source from the resolved @astryxdesign/core (or its owning " +
-    'integration) into your project for deep customization. The copy builds on its ' +
-    'own: it imports what the package exports from the package, and carries every ' +
-    "internal module the component needs beside it in the package's folder layout. " +
+    'integration) into your project for deep customization. Every import in the copy ' +
+    'names a file the copy holds or a path the package exports: names the package ' +
+    'exports come from the package, and every internal module the component needs ' +
+    "is copied beside it in the package's folder layout. " +
     'Tests, stories and docs are not copied. With no name it lists the swizzlable components. ' +
     'An integration component that replaces a Core component is what that Core name ' +
     'copies; --package @astryxdesign/core copies the original. --list lists Core ' +

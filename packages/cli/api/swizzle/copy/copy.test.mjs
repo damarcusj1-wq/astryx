@@ -6,7 +6,7 @@
  * becomes a path segment) must both be confined to cwd.
  */
 
-import {describe, it, expect, afterEach, vi} from 'vitest';
+import {describe, it, expect, afterEach, beforeEach, vi} from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -442,6 +442,83 @@ describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
       expect(
         fs.readFileSync(path.join(out(), 'TextInput/TextInput.tsx'), 'utf-8'),
       ).not.toContain(`groupStyles.v${version}`);
+    },
+    SLOW,
+  );
+});
+
+describe('swizzle.copy — helpers an earlier swizzle wrote (spec:AST-110 FR2)', () => {
+  /** @type {string} */
+  let project;
+  const VERSION = '1.0.0';
+  /** A fake Core whose components share a helper that imports another. */
+  const buildCore = () => {
+    const src = path.join(project, 'node_modules/@astryxdesign/core/src');
+    const write = (rel, text) => {
+      fs.mkdirSync(path.dirname(path.join(src, rel)), {recursive: true});
+      fs.writeFileSync(path.join(src, rel), text);
+    };
+    write('utils/h.ts', 'export const h = 1;\n');
+    fs.writeFileSync(
+      path.join(src, '../package.json'),
+      JSON.stringify({name: '@astryxdesign/core', version: VERSION}),
+    );
+    write('utils/a.ts', "import {h} from './h';\nexport const a = h;\n");
+    for (const name of ['Button', 'Card', 'Dialog']) {
+      write(
+        `${name}/${name}.tsx`,
+        `import {a} from '../utils/a';\nexport const ${name} = () => a;\n`,
+      );
+      write(`${name}/index.ts`, `export {${name}} from './${name}';\n`);
+    }
+  };
+  const out = rel => path.join(project, 'components/astryx', rel);
+  const read = rel => fs.readFileSync(out(rel), 'utf-8');
+
+  beforeEach(() => {
+    project = fs.mkdtempSync(path.join(os.tmpdir(), 'astryx-swizzle-helpers-'));
+    fs.writeFileSync(
+      path.join(project, 'package.json'),
+      JSON.stringify({name: 'consumer', version: '1.0.0'}),
+    );
+    buildCore();
+  });
+  afterEach(() => {
+    fs.rmSync(project, {recursive: true, force: true});
+  });
+
+  it(
+    'never rewrites a version-suffixed helper an earlier copy imports',
+    async () => {
+      await swizzle('Button', {cwd: project});
+      fs.appendFileSync(out('utils/a.ts'), '// edited by the product\n');
+      fs.appendFileSync(out('utils/h.ts'), '// edited by the product\n');
+
+      // The edited helpers stay; Card gets its own.
+      await swizzle('Card', {cwd: project});
+      expect(read('Card/Card.tsx')).toContain(`from '../utils/a.v${VERSION}'`);
+      const cardHelper = read(`utils/a.v${VERSION}.ts`);
+      expect(cardHelper).toContain(`from './h.v${VERSION}'`);
+      fs.appendFileSync(out(`utils/h.v${VERSION}.ts`), '// edited again\n');
+
+      const dialog = await swizzle('Dialog', {cwd: project});
+      // Card's copy is untouched: its helper still imports its own h.
+      expect(read(`utils/a.v${VERSION}.ts`)).toBe(cardHelper);
+      expect(read(`utils/h.v${VERSION}.ts`)).toContain('// edited again');
+      expect(read('utils/h.ts')).toContain('// edited by the product');
+      // Dialog points at helpers of its own.
+      expect(dialog.data.files).toEqual(
+        expect.arrayContaining([
+          `../utils/a.v${VERSION}-2.ts`,
+          `../utils/h.v${VERSION}-2.ts`,
+        ]),
+      );
+      expect(read(`utils/a.v${VERSION}-2.ts`)).toContain(
+        `from './h.v${VERSION}-2'`,
+      );
+      expect(read('Dialog/Dialog.tsx')).toContain(
+        `from '../utils/a.v${VERSION}-2'`,
+      );
     },
     SLOW,
   );

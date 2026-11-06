@@ -394,25 +394,24 @@ export async function swizzleCopy(component, options = {}) {
     }
   };
   // A helper an earlier swizzle wrote is reused when it is the same. A
-  // different one is never overwritten: this copy writes its own under a
-  // version-suffixed name, and so does every helper that imports it.
-  for (let changed = true; changed; ) {
-    changed = false;
+  // different file is never overwritten: this copy moves its own helper to
+  // the next free version-suffixed name. A move changes the import in every
+  // helper that imports it, so the check repeats until nothing moves.
+  /** @type {Map<string, number>} helper -> how many names it tried */
+  const attempts = new Map();
+  for (let moved = true; moved; ) {
+    moved = false;
     for (const file of helpers) {
-      if (ownerGroup.has(file) || redirected.has(file)) continue;
-      const existing = readExisting(baseDestOf(file));
-      if (existing != null && existing !== render(file)) {
-        redirected.set(file, versionedPath(baseDestOf(file), ownerVersion, 1));
-        changed = true;
-      }
-    }
-  }
-  for (const file of redirected.keys()) {
-    for (let n = 1; ; n++) {
-      const dest = versionedPath(baseDestOf(file), ownerVersion, n);
-      redirected.set(file, dest);
-      const existing = readExisting(dest);
-      if (existing == null || existing === render(file)) break;
+      if (ownerGroup.has(file)) continue;
+      const existing = readExisting(destOf(file));
+      if (existing == null || existing === render(file)) continue;
+      const attempt = (attempts.get(file) ?? 0) + 1;
+      attempts.set(file, attempt);
+      redirected.set(
+        file,
+        versionedPath(baseDestOf(file), ownerVersion, attempt),
+      );
+      moved = true;
     }
   }
 

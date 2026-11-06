@@ -13,6 +13,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {parse} from '@babel/parser';
+import {moduleExportOrigins} from '../../foundation/discovery/module-exports.mjs';
+import {sourceExportTarget} from '../../foundation/discovery/package-exports.mjs';
+import {subpathDeclaration} from '../../foundation/integrations/exports-subpaths.mjs';
 
 /** The extensions an extensionless import may name, in resolution order. */
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.mjs', '.js', '.jsx'];
@@ -28,29 +31,23 @@ const toPosix = file => file.split(path.sep).join('/');
  * The file an import names, or null when no file is there.
  * @param {string} fromFile absolute path of the importing file
  * @param {string} specifier a relative specifier
+ * @param {Map<string, string|null>} cache resolutions already made in this copy
  * @returns {string|null}
  */
-export function resolveRelative(fromFile, specifier) {
+function resolveRelative(fromFile, specifier, cache) {
   const base = path.resolve(path.dirname(fromFile), specifier);
-  const cached = resolveCache.get(base);
-  if (cached !== undefined) return cached;
-  const found = resolveUncached(base);
-  resolveCache.set(base, found);
-  return found;
-}
-
-/** @type {Map<string, string|null>} */
-const resolveCache = new Map();
-
-/** @param {string} base */
-function resolveUncached(base) {
+  const known = cache.get(base);
+  if (known !== undefined) return known;
+  let found = null;
   for (const suffix of ['', ...SOURCE_EXTENSIONS, ...INDEX_FILES]) {
     const candidate = base + suffix;
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-      return candidate;
+      found = candidate;
+      break;
     }
   }
-  return null;
+  cache.set(base, found);
+  return found;
 }
 
 /**
@@ -71,14 +68,8 @@ function resolveUncached(base) {
  * @typedef {object} ParsedModule
  * @property {string} code
  * @property {ModuleReference[]} references
- *
- * @typedef {Map<string, {source: string|null, name: string}>} ExportEntries
- *   exported name -> where it comes from (`source` null for a declaration in
- *   the module itself)
- */
 
-/** @type {Map<string, ParsedModule>} */
-const parseCache = new Map();
+ */
 
 /**
  * A module's source and every module reference in it: static imports and
@@ -86,13 +77,10 @@ const parseCache = new Map();
  * @param {string} file
  * @returns {ParsedModule}
  */
-export function parseModule(file) {
-  const cached = parseCache.get(file);
-  if (cached) return cached;
+function parseModule(file) {
   const code = fs.readFileSync(file, 'utf-8');
   /** @type {ParsedModule} */
   const parsed = {code, references: []};
-  parseCache.set(file, parsed);
   if (!CODE_FILE.test(file)) return parsed;
   const ast = parse(code, {
     sourceType: 'module',
@@ -229,243 +217,59 @@ function visitDynamicReferences(node, onLiteral) {
   }
 }
 
-/** @type {Map<string, {exports: ExportEntries, starSources: string[]}>} */
-const exportCache = new Map();
-
 /**
- * A module's exports, read from its `export` statements without a full
- * parse: the public surface spans most of the package, and only its export
- * statements matter.
- * @param {string} file
- * @returns {{exports: ExportEntries, starSources: string[]}}
- */
-export function scanExports(file) {
-  const cached = exportCache.get(file);
-  if (cached) return cached;
-  /** @type {ExportEntries} */
-  const exports = new Map();
-  /** @type {string[]} */
-  const starSources = [];
-  const result = {exports, starSources};
-  exportCache.set(file, result);
-  if (!CODE_FILE.test(file)) return result;
-  const code = fs
-    .readFileSync(file, 'utf-8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '');
-  for (const m of code.matchAll(
-    /^export\s+(?:type\s+)?\*\s+(?:as\s+(\w+)\s+)?from\s+['"]([^'"]+)['"]/gm,
-  )) {
-    if (m[1]) exports.set(m[1], {source: m[2], name: '*'});
-    else starSources.push(m[2]);
-  }
-  for (const m of code.matchAll(
-    /^export\s+(?:type\s+)?\{([^}]*)\}(?:\s*from\s+['"]([^'"]+)['"])?/gm,
-  )) {
-    for (const raw of m[1].split(',')) {
-      const part = raw.trim().replace(/^type\s+/, '');
-      if (!part) continue;
-      const [local, exported = local] = part
-        .split(/\s+as\s+/)
-        .map(x => x.trim());
-      exports.set(exported, {source: m[2] ?? null, name: local});
-    }
-  }
-  for (const m of code.matchAll(
-    /^export\s+(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?(?:function\*?|class|const|let|var|interface|type|enum|namespace)\s+([A-Za-z_$][\w$]*)/gm,
-  )) {
-    exports.set(m[1], {source: null, name: m[1]});
-  }
-  for (const m of code.matchAll(
-    /^export\s+(?:const|let|var)\s+\{([^}]*)\}/gm,
-  )) {
-    for (const raw of m[1].split(',')) {
-      const name = raw.split(':').pop()?.trim().replace(/=.*$/, '').trim();
-      if (name) exports.set(name, {source: null, name});
-    }
-  }
-  if (/^export\s+default\b/m.test(code) || /^export\s*=/m.test(code)) {
-    exports.set('default', {source: null, name: 'default'});
-  }
-  return result;
-}
-
-/** @type {Map<string, Map<string, {file: string, name: string}>>} */
-const exportMapCache = new Map();
-
-/**
- * Every name a module exports, `export *` included, with the module that
- * defines it and its name there.
- * @param {string} file
- * @param {Set<string>} [visiting] modules on the current path, against cycles
- * @returns {Map<string, {file: string, name: string}>}
- */
-export function exportMapOf(file, visiting = new Set()) {
-  const cached = exportMapCache.get(file);
-  if (cached) return cached;
-  /** @type {Map<string, {file: string, name: string}>} */
-  const map = new Map();
-  if (visiting.has(file)) return map;
-  visiting.add(file);
-  const {exports, starSources} = scanExports(file);
-  for (const [name, entry] of exports) {
-    if (entry.source == null) {
-      map.set(name, {file, name});
-      continue;
-    }
-    if (!entry.source.startsWith('.')) {
-      map.set(name, {file: entry.source, name: entry.name});
-      continue;
-    }
-    const target = resolveRelative(file, entry.source);
-    if (!target) continue;
-    if (entry.name === '*') {
-      map.set(name, {file: target, name: '*'});
-      continue;
-    }
-    map.set(
-      name,
-      exportMapOf(target, visiting).get(entry.name) ?? {
-        file: target,
-        name: entry.name,
-      },
-    );
-  }
-  for (const source of starSources) {
-    if (!source.startsWith('.')) continue;
-    const target = resolveRelative(file, source);
-    if (!target) continue;
-    for (const [name, origin] of exportMapOf(target, visiting)) {
-      if (name !== 'default' && !map.has(name)) map.set(name, origin);
-    }
-  }
-  visiting.delete(file);
-  exportMapCache.set(file, map);
-  return map;
-}
-
-/**
- * Where an exported name of a module is defined.
- * @param {string} file
- * @param {string} name
- * @returns {{file: string, name: string}|null}
- */
-export function originOf(file, name) {
-  return exportMapOf(file).get(name) ?? null;
-}
-
-/**
- * Every name a module exports.
- * @param {string} file
- * @returns {Set<string>}
- */
-export function exportedNamesOf(file) {
-  return new Set(exportMapOf(file).keys());
-}
-
-/**
- * The owner package's public surface: for each subpath its `exports` map
- * lists with a source file under the source root, the names it exports and
- * where each is defined. `./internal/*` subpaths are not public.
+ * @typedef {(file: string) => Map<string, {file: string, name: string}>} OriginsOf
+ *   every name a module exports, types included, with where it is declared
  *
+ * @typedef {object} PublicSurface
+ * @property {Map<string, Array<{subpath: string, name: string}>>} byOrigin
+ *   `file#name` of a declaration -> the subpaths that export it, and as what
+ * @property {Map<string, string>} byFile source file -> the subpath that
+ *   exports exactly that file
+ * @property {Record<string, unknown>|undefined} exportsField
+ */
+
+/**
+ * The owner package's public surface, read from its `exports` map: each
+ * subpath with a `source` condition under the source root, and the
+ * declarations it exports. `./internal/*` subpaths are not public.
  * @param {string} packageDir
  * @param {string} srcRoot
- * @returns {{byOrigin: Map<string, Array<{subpath: string, name: string}>>, byFile: Map<string, string>, patterns: string[]}}
+ * @param {OriginsOf} originsOf
+ * @returns {PublicSurface}
  */
-export function publicSurfaceOf(packageDir, srcRoot) {
-  /** @type {Record<string, unknown>} */
-  let exportsMap;
+function publicSurfaceOf(packageDir, srcRoot, originsOf) {
+  /** @type {{exports?: unknown}} */
+  let pkg;
   try {
-    exportsMap =
-      JSON.parse(
-        fs.readFileSync(path.join(packageDir, 'package.json'), 'utf-8'),
-      ).exports ?? {};
+    pkg = JSON.parse(
+      fs.readFileSync(path.join(packageDir, 'package.json'), 'utf-8'),
+    );
   } catch {
-    exportsMap = {};
+    pkg = {};
   }
-  /** @type {Map<string, Array<{subpath: string, name: string}>>} */
+  const exportsField =
+    pkg.exports && typeof pkg.exports === 'object'
+      ? /** @type {Record<string, unknown>} */ (pkg.exports)
+      : undefined;
+  /** @type {PublicSurface['byOrigin']} */
   const byOrigin = new Map();
-  /** @type {Map<string, string>} source file -> its exact subpath */
+  /** @type {PublicSurface['byFile']} */
   const byFile = new Map();
-  /** @type {string[]} */
-  const patterns = [];
-  for (const [subpath, target] of Object.entries(exportsMap)) {
-    if (/^\.\/internal(\/|$)/.test(subpath)) continue;
-    if (subpath.includes('*')) {
-      patterns.push(subpath);
-      continue;
-    }
-    const sourceFile = sourceFileOf(packageDir, srcRoot, subpath, target);
-    if (!sourceFile) continue;
+  for (const subpath of Object.keys(exportsField ?? {})) {
+    if (subpath.includes('*') || /^\.\/internal(\/|$)/.test(subpath)) continue;
+    const sourceFile = sourceExportTarget(pkg, packageDir, subpath);
+    if (!sourceFile || !sourceFile.startsWith(srcRoot + path.sep)) continue;
     byFile.set(sourceFile, subpath);
     if (!CODE_FILE.test(sourceFile)) continue;
-    for (const name of exportedNamesOf(sourceFile)) {
-      const origin = originOf(sourceFile, name);
-      if (!origin) continue;
+    for (const [name, origin] of originsOf(sourceFile)) {
       const key = `${origin.file}#${origin.name}`;
       const list = byOrigin.get(key) ?? [];
       list.push({subpath, name});
       byOrigin.set(key, list);
     }
   }
-  return {byOrigin, byFile, patterns};
-}
-
-/**
- * The source file behind an `exports` entry: its `source` condition, or the
- * same path under the source root as its default target under `dist`.
- * @param {string} packageDir
- * @param {string} srcRoot
- * @param {string} subpath
- * @param {unknown} target
- * @returns {string|null}
- */
-function sourceFileOf(packageDir, srcRoot, subpath, target) {
-  const conditions =
-    typeof target === 'string'
-      ? {default: target}
-      : /** @type {Record<string, unknown>} */ (target ?? {});
-  const candidates = [];
-  if (typeof conditions.source === 'string')
-    candidates.push(path.join(packageDir, conditions.source));
-  for (const value of [conditions.default, conditions.import]) {
-    if (typeof value === 'string')
-      candidates.push(path.join(packageDir, value));
-  }
-  const rest = subpath === '.' ? 'index' : subpath.slice(2);
-  candidates.push(path.join(srcRoot, rest));
-  for (const candidate of candidates) {
-    if (
-      fs.existsSync(candidate) &&
-      fs.statSync(candidate).isFile() &&
-      candidate.startsWith(srcRoot + path.sep)
-    ) {
-      return candidate;
-    }
-    const stem = candidate.replace(/\.[cm]?jsx?$/, '');
-    for (const suffix of ['', ...SOURCE_EXTENSIONS, ...INDEX_FILES]) {
-      const file = stem + suffix;
-      if (
-        file.startsWith(srcRoot + path.sep) &&
-        fs.existsSync(file) &&
-        fs.statSync(file).isFile()
-      )
-        return file;
-    }
-  }
-  return null;
-}
-
-/**
- * Whether `subpath` matches an `exports` pattern such as `./locales/*.json`.
- * @param {string[]} patterns
- * @param {string} subpath
- */
-function matchesPattern(patterns, subpath) {
-  return patterns.some(pattern => {
-    const [head, tail] = pattern.split('*');
-    return subpath.startsWith(head) && subpath.endsWith(tail);
-  });
+  return {byOrigin, byFile, exportsField};
 }
 
 /**
@@ -508,7 +312,28 @@ export function planCopy({
   ownerPackage,
   entries,
 }) {
-  const surface = publicSurfaceOf(packageDir, srcRoot);
+  // Every read is cached for this copy only, so a later copy sees the
+  // package as it is then.
+  /** @type {Map<string, Map<string, {file: string, name: string}>>} */
+  const exportMemo = new Map();
+  /** @type {OriginsOf} */
+  const originsOf = file =>
+    moduleExportOrigins(file, {types: true, memo: exportMemo});
+  /** @param {string} file @param {string} name */
+  const originOf = (file, name) => originsOf(file).get(name) ?? null;
+  /**
+   * The name a module exports one of its own bindings under, or null.
+   * @param {{file: string, name: string}} origin
+   */
+  const exportNameOf = origin => {
+    for (const [name, found] of originsOf(origin.file)) {
+      if (found.file === origin.file && found.name === origin.name) return name;
+    }
+    return null;
+  };
+  /** @type {Map<string, string|null>} */
+  const resolutions = new Map();
+  const surface = publicSurfaceOf(packageDir, srcRoot, originsOf);
   /** @type {CopyPlan['files']} */
   const files = new Map();
   /** @type {CopyPlan['dependsOn']} */
@@ -536,7 +361,7 @@ export function planCopy({
   const subpathCoveringModule = file => {
     const exact = surface.byFile.get(file);
     if (exact) return exact;
-    const names = [...exportedNamesOf(file)];
+    const names = [...originsOf(file).keys()];
     if (names.length === 0) return null;
     const options = names.map(name => {
       const origin = originOf(file, name);
@@ -616,7 +441,7 @@ export function planCopy({
     if (!CODE_FILE.test(file)) continue;
     for (const ref of parsed.references) {
       if (!ref.source.startsWith('.')) continue;
-      const target = resolveRelative(file, ref.source);
+      const target = resolveRelative(file, ref.source, resolutions);
       // A dangling import is left for the build to report.
       if (!target) continue;
       if (inComponent(target)) {
@@ -629,8 +454,7 @@ export function planCopy({
         // An asset beside the source root, such as `../../locales/en.json`.
         const subpath = `./${toPosix(path.relative(packageDir, target))}`;
         if (
-          matchesPattern(surface.patterns, subpath) ||
-          surface.byFile.has(target)
+          subpathDeclaration(surface.exportsField, subpath).state === 'declared'
         ) {
           edits.push(
             sourceEdit(parsed.code, ref, `${ownerPackage}/${subpath.slice(2)}`),
@@ -692,15 +516,19 @@ export function planCopy({
           publicOptions.find(o => o.subpath === chosen)
         ).name;
         add(publicSpecifier(chosen), {...spec, imported: exported});
-      } else if (origin && !path.isAbsolute(origin.file)) {
-        // A name the package re-exports from an npm package comes from there.
-        add(origin.file, {...spec, imported: origin.name});
-      } else if (origin && inSource(origin.file) && origin.name !== '*') {
-        // Take the name from the module that defines it, so the copy carries
-        // that module and not a whole barrel.
-        add(carry(file, origin.file), {...spec, imported: origin.name});
       } else {
-        add(carry(file, target), spec);
+        // Take the name from the module that defines it, so the copy carries
+        // that module and not a whole barrel. An origin names a binding, so
+        // the import uses the name that module exports it under.
+        const definingExport =
+          origin && origin.file !== target && inSource(origin.file)
+            ? exportNameOf(origin)
+            : null;
+        if (origin && definingExport != null) {
+          add(carry(file, origin.file), {...spec, imported: definingExport});
+        } else {
+          add(carry(file, target), spec);
+        }
       }
     }
     // One source and the same names: keep the statement as written and swap

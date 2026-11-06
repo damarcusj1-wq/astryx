@@ -17,8 +17,9 @@ export const doc = {
   description:
     "Ejects a component's source into the consumer project for deep customization. " +
     'It copies from the locally resolved @astryxdesign/core (or the owning integration) ' +
-    'package source. The copy builds on its own: names the owner package exports are ' +
-    'imported from its public paths, and every internal module the component needs is ' +
+    'package source. Every import in the copy names a file the copy holds or a path ' +
+    'the owner package exports: names the package exports are imported from its ' +
+    'public paths, and every internal module the component needs is ' +
     "copied beside it in the package's folder layout. Tests, stories and docs are not " +
     'copied. The receipt flags whether any copied file uses StyleX. With no name ' +
     '(or list) it returns the swizzlable component names instead. An integration ' +
