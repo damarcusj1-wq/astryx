@@ -327,15 +327,18 @@ export async function swizzleCopy(component, options = {}) {
   // writes anything.
   const feedback = buildFeedback(dirName, owner.issuesUrl);
 
-  // The copy follows the component's module graph.
+  // The copy follows the component's module graph through the whole source
+  // root: `src/` when the package has one around the component, else the
+  // package itself.
   const packageDir = packageDirOf(componentDir);
   const packageSrc = path.join(packageDir, 'src');
-  const srcRoot = componentDir.startsWith(packageSrc + path.sep)
-    ? packageSrc
-    : path.dirname(componentDir);
+  const inPackageSrc = componentDir.startsWith(packageSrc + path.sep);
+  const graphRoot = inPackageSrc ? packageSrc : packageDir;
+  // Carried modules keep their layout relative to this folder.
+  const srcRoot = inPackageSrc ? packageSrc : path.dirname(componentDir);
   const plan = planCopy({
     packageDir,
-    srcRoot,
+    srcRoot: graphRoot,
     componentDir,
     ownerPackage: owner.ownerPackage,
     entries: entryFilesOf(componentDir),
@@ -348,11 +351,18 @@ export async function swizzleCopy(component, options = {}) {
   const layoutRoot = isWithin(shiftedRoot, outputBase) ? shiftedRoot : outputBase;
   /** @param {string} file */
   const isComponentFile = file => file.startsWith(componentDir + path.sep);
+  // A module above that folder, such as `lib/` beside an integration's
+  // `components/`, goes under the output folder by its path in the package.
   /** @param {string} file */
-  const baseDestOf = file =>
-    isComponentFile(file)
-      ? path.join(outputDir, path.relative(componentDir, file))
-      : path.join(layoutRoot, path.relative(srcRoot, file));
+  const baseDestOf = file => {
+    if (isComponentFile(file)) {
+      return path.join(outputDir, path.relative(componentDir, file));
+    }
+    if (file.startsWith(srcRoot + path.sep)) {
+      return path.join(layoutRoot, path.relative(srcRoot, file));
+    }
+    return path.join(outputBase, path.relative(graphRoot, file));
+  };
 
   const allFiles = [...plan.files.keys()];
   const componentFiles = allFiles.filter(isComponentFile);
@@ -361,14 +371,14 @@ export async function swizzleCopy(component, options = {}) {
   // imports travel whole and are replaced only with --overwrite.
   const ownerGroup = new Set();
   const ownerQueue = helpers.filter(f =>
-    OWNER_MODULE.test(toModulePath(srcRoot, f)),
+    OWNER_MODULE.test(toModulePath(graphRoot, f)),
   );
   while (ownerQueue.length > 0) {
     const file = /** @type {string} */ (ownerQueue.shift());
     if (ownerGroup.has(file)) continue;
     ownerGroup.add(file);
     for (const dep of plan.dependsOn.get(file) ?? []) {
-      if (!isComponentFile(dep) && STYLEX_MODULE.test(toModulePath(srcRoot, dep))) {
+      if (!isComponentFile(dep) && STYLEX_MODULE.test(toModulePath(graphRoot, dep))) {
         ownerQueue.push(dep);
       }
     }

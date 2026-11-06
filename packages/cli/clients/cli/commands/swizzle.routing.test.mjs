@@ -212,6 +212,42 @@ describe('swizzle — integration-owned components', () => {
     expect(out).toContain(`from './sibling'`);
   });
 
+  it('carries a module beside the components folder, under the output folder by its package path', async () => {
+    buildFakeCore(project);
+    writeProjectPackageJson(project);
+    const {intDir, compDir} = buildIntegration(project, {
+      issuesUrl: 'https://example.com/meta/issues',
+    });
+    // A helper at the package root, beside `components/`.
+    fs.mkdirSync(path.join(intDir, 'lib'), {recursive: true});
+    fs.writeFileSync(
+      path.join(intDir, 'lib', 'helper.ts'),
+      `export const helper = 2;\n`,
+    );
+    fs.writeFileSync(
+      path.join(compDir, 'MetaAppShell.tsx'),
+      [
+        `import {helper} from '../../lib/helper';`,
+        `export function MetaAppShell() { return helper; }`,
+        '',
+      ].join('\n'),
+    );
+
+    const result = await runCli(['--json', 'swizzle', 'MetaAppShell', '-f'], project);
+    expect(result.code).toBe(0);
+    const env = JSON.parse(result.stdout);
+    const output = path.join(project, 'components', 'astryx');
+    const out = fs.readFileSync(
+      path.join(output, 'MetaAppShell', 'MetaAppShell.tsx'),
+      'utf-8',
+    );
+    expect(out).toContain(`from '../lib/helper'`);
+    expect(env.data.files).toContain('../lib/helper.ts');
+    expect(fs.readFileSync(path.join(output, 'lib', 'helper.ts'), 'utf-8')).toBe(
+      `export const helper = 2;\n`,
+    );
+  });
+
   it('omits the feedback note when the integration ships no issuesUrl', async () => {
     buildFakeCore(project);
     writeProjectPackageJson(project);
