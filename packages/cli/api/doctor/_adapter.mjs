@@ -39,6 +39,7 @@ import {
 } from '../../foundation/agent-docs/computer-agent-text.mjs';
 import {computerAgentTextSettings} from '../../foundation/env/user-settings.mjs';
 import * as fs from 'node:fs';
+import {satisfiesRange} from '../../foundation/env/semver.mjs';
 import * as path from 'node:path';
 import {
   Project,
@@ -164,6 +165,28 @@ export function resolveDoctorThemeImports(theme, options) {
 /** @param {string} projectDir */
 export function discoverDoctorUnmigratedCopies(projectDir) {
   return discoverUnmigratedThemeCopies(projectDir);
+}
+
+/**
+ * The `@astryxdesign/core` range a package's peerDependencies declare, and
+ * whether it accepts `coreVersion` (spec:AST-017/FR12). The one rule every
+ * doctor check uses to compare a package with the installed Core:
+ * `theme-core-peers` for added theme packages, `integration-core-range` for
+ * every other loaded integration.
+ * @param {{peerDependencies?: Record<string, unknown>} | null | undefined} pkg
+ * @param {string | null | undefined} coreVersion
+ * @returns {{range: string | null, accepts: boolean}}
+ */
+export function corePeerRange(pkg, coreVersion) {
+  const raw = pkg?.peerDependencies?.['@astryxdesign/core'];
+  const range =
+    typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;
+  return {
+    range,
+    accepts: Boolean(
+      range && coreVersion && satisfiesRange(coreVersion, range),
+    ),
+  };
 }
 
 /** @param {string} projectDir */
