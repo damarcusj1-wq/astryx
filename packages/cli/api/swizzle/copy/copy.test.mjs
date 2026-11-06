@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import ts from 'typescript';
 import {swizzle} from '../swizzle.mjs';
 
 /** Set by a test to make the gh lookup throw an error it does not expect. */
@@ -272,6 +273,161 @@ describe('swizzle.copy — private attribute owner modules (spec:AST-110 FR4)', 
       expect(fs.existsSync(path.join(out(), 'motion'))).toBe(false);
       // The folder that was there before the run stays.
       expect(fs.existsSync(blocked)).toBe(true);
+    },
+    SLOW,
+  );
+});
+
+describe('swizzle.copy — the module graph (spec:AST-110 FR1, FR2)', () => {
+  const GRAPH_OUT = 'tmp-swizzle-graph-test';
+  const out = () => path.join(REPO, GRAPH_OUT);
+  const CORE = path.join(REPO, 'packages/core');
+  /** Every file under a folder, as paths relative to it. */
+  const filesUnder = dir =>
+    fs
+      .readdirSync(dir, {recursive: true, withFileTypes: true})
+      .filter(e => e.isFile())
+      .map(e => path.relative(dir, path.join(e.parentPath, e.name)));
+  /** Every `from '...'` and `import('...')` specifier in a file. */
+  const importsOf = file =>
+    [
+      ...fs
+        .readFileSync(file, 'utf-8')
+        .matchAll(/(?:from\s+|import\(\s*)['"]([^'"]+)['"]/g),
+    ].map(m => ({specifier: m[1]}));
+  /**
+   * Diagnostics TypeScript reports for the copied files when it resolves
+   * `@astryxdesign/core` the way a product does: through the package's
+   * `exports`. Only unresolved modules and missing exports count here.
+   */
+  const unresolvedImportsIn = files => {
+    const program = ts.createProgram(files, {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      customConditions: ['source'],
+      jsx: ts.JsxEmit.ReactJSX,
+      strict: true,
+      skipLibCheck: true,
+      noEmit: true,
+      resolveJsonModule: true,
+    });
+    const RESOLUTION = new Set([2305, 2307, 2614, 2724, 1192]);
+    return files.flatMap(file =>
+      program
+        .getSemanticDiagnostics(program.getSourceFile(file))
+        .filter(d => RESOLUTION.has(d.code))
+        .map(d => `${path.relative(out(), file)}: TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`),
+    );
+  };
+
+  afterEach(() => {
+    fs.rmSync(out(), {recursive: true, force: true});
+  });
+
+  it(
+    'copies the internal helpers a component reaches, and imports public names from public paths',
+    async () => {
+      const r = await swizzle('Button', {cwd: REPO, output: './' + GRAPH_OUT});
+      await swizzle('Dialog', {cwd: REPO, output: './' + GRAPH_OUT});
+      // InputGroupInternalContext is not exported, so the copy carries it.
+      expect(r.data.files).toContain(
+        '../InputGroup/InputGroupInternalContext.ts',
+      );
+      expect(r.data.filesCopied).toBe(r.data.files.length);
+      const files = filesUnder(out())
+        .filter(rel => /\.tsx?$/.test(rel))
+        .map(rel => path.join(out(), rel));
+      for (const file of files) {
+        for (const {specifier} of importsOf(file)) {
+          expect(specifier, path.relative(out(), file)).not.toMatch(/^@astryxdesign\/core\/internal/);
+          if (specifier.startsWith('.')) {
+            expect(
+              path.resolve(path.dirname(file), specifier).startsWith(out()),
+              `${specifier} in ${path.relative(out(), file)} stays in the output`,
+            ).toBe(true);
+          }
+        }
+      }
+      expect(unresolvedImportsIn(files)).toEqual([]);
+    },
+    SLOW,
+  );
+
+  it(
+    'imports a StyleX module by its own exported path',
+    async () => {
+      await swizzle('Button', {cwd: REPO, output: './' + GRAPH_OUT});
+      const source = fs.readFileSync(path.join(out(), 'Button/Button.tsx'), 'utf-8');
+      expect(source).toContain("from '@astryxdesign/core/theme/tokens.stylex'");
+      expect(source).not.toMatch(/from '@astryxdesign\/core\/theme'/);
+    },
+    SLOW,
+  );
+
+  it(
+    'copies the nested folders a component imports',
+    async () => {
+      const r = await swizzle('Table', {cwd: REPO, output: './' + GRAPH_OUT});
+      expect(r.data.files).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/^plugins\/sortable\//),
+          expect.stringMatching(/^plugins\/selection\//),
+        ]),
+      );
+    },
+    SLOW,
+  );
+
+  it(
+    'holds only source the component runs',
+    async () => {
+      for (const name of ['Badge', 'Field']) {
+        await swizzle(name, {cwd: REPO, output: './' + GRAPH_OUT});
+      }
+      const files = filesUnder(out());
+      expect(files.length).toBeGreaterThan(0);
+      for (const file of files) {
+        expect(file).not.toMatch(
+          /\.(?:test|spec|stories|story|doc|bench)\.|test-violations|render-testing|__tests__|__fixtures__|\.md$/,
+        );
+      }
+    },
+    SLOW,
+  );
+
+  it(
+    'reuses an identical helper, and never overwrites a different one',
+    async () => {
+      await swizzle('Button', {cwd: REPO, output: './' + GRAPH_OUT});
+      const helper = path.join(out(), 'InputGroup/groupStyles.ts');
+      const original = fs.readFileSync(helper, 'utf-8');
+
+      // An identical helper is part of the next copy, unwritten.
+      const second = await swizzle('IconButton', {cwd: REPO, output: './' + GRAPH_OUT});
+      expect(second.data.files).toContain('../InputGroup/groupStyles.ts');
+
+      // A changed helper stays as the product left it, even with --overwrite.
+      fs.writeFileSync(helper, original + '\n// edited\n');
+      const third = await swizzle('Button', {
+        cwd: REPO,
+        output: './' + GRAPH_OUT,
+        overwrite: true,
+      });
+      expect(fs.readFileSync(helper, 'utf-8')).toBe(original + '\n// edited\n');
+      const version = JSON.parse(
+        fs.readFileSync(path.join(CORE, 'package.json'), 'utf-8'),
+      ).version;
+      const suffixed = `../InputGroup/groupStyles.v${version}.ts`;
+      expect(third.data.files).toContain(suffixed);
+      expect(fs.readFileSync(path.join(out(), 'Button', suffixed), 'utf-8')).toBe(original);
+      // Only the new copy points at the suffixed helper.
+      expect(
+        fs.readFileSync(path.join(out(), 'Button/Button.tsx'), 'utf-8'),
+      ).toContain(`from '../InputGroup/groupStyles.v${version}'`);
+      expect(
+        fs.readFileSync(path.join(out(), 'IconButton/IconButton.tsx'), 'utf-8'),
+      ).not.toContain(`groupStyles.v${version}`);
     },
     SLOW,
   );
